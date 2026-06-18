@@ -106,7 +106,7 @@ class Agent:
                 calls = recovered
                 content = cleaned
                 if self.verbose:
-                    print("  \033[2m(recovered tool call(s) from model text)\033[0m")
+                    print(f"  \033[2m(recovered {len(recovered)} tool call(s) from model text)\033[0m")
 
         assistant = {"role": "assistant", "content": content}
         if calls:
