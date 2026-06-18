@@ -16,6 +16,7 @@ from .base import ToolContext, ToolSpec, register
 
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=SUBAGENT_MAX_WORKERS)
 _RESULTS: dict = {}
+_META: dict = {}  # sub_id -> short description
 
 
 def spawn_subagent(ctx: ToolContext, task: str, description: str,
@@ -32,6 +33,7 @@ def spawn_subagent(ctx: ToolContext, task: str, description: str,
     fut = _EXECUTOR.submit(run_subagent, task, description, use_model, use_cwd,
                            base_url, num_ctx, temperature, ctx.approval)
     _RESULTS[sub_id] = fut
+    _META[sub_id] = description
     return (f"Spawned sub-agent {sub_id} ('{description}'), running in parallel. "
             f"Call get_subagent_result(subagent_id='{sub_id}') to collect its summary.")
 
@@ -61,10 +63,35 @@ register(ToolSpec(
     impl=spawn_subagent, mutating=True, category="exec",
 ))
 
+def list_active_subagents(ctx: ToolContext) -> str:
+    if not _RESULTS:
+        return "No sub-agents have been spawned yet."
+    lines = []
+    for sid, fut in _RESULTS.items():
+        if not fut.done():
+            status = "running"
+        else:
+            try:
+                fut.result(timeout=0)
+                status = "done"
+            except Exception as e:
+                status = f"failed ({e})"
+        desc = _META.get(sid, "")
+        lines.append(f"  {sid}: {status}" + (f" - {desc}" if desc else ""))
+    return "Sub-agents:\n" + "\n".join(lines)
+
+
 register(ToolSpec(
     name="get_subagent_result",
     description="Collect the summary from a sub-agent previously started with spawn_subagent.",
     parameters={"type": "object", "properties": {"subagent_id": {"type": "string"}},
                 "required": ["subagent_id"]},
     impl=get_subagent_result, category="read",
+))
+
+register(ToolSpec(
+    name="list_active_subagents",
+    description="List sub-agents spawned this session with their id, status (running/done/failed), and label.",
+    parameters={"type": "object", "properties": {}, "required": []},
+    impl=list_active_subagents, category="read",
 ))

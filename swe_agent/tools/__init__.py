@@ -16,6 +16,9 @@ from . import planning    # noqa: E402,F401
 from . import web         # noqa: E402,F401
 from . import notebook    # noqa: E402,F401
 from . import subagent    # noqa: E402,F401  (lazily imports agent inside its impl)
+from . import quality      # noqa: E402,F401
+from . import analysis     # noqa: E402,F401
+from . import completion   # noqa: E402,F401
 
 
 def _build_schema():

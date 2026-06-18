@@ -14,7 +14,7 @@ from pathlib import Path
 # /api/chat because the OpenAI-compatible /v1 endpoint cannot set num_ctx and
 # has buggy streaming-with-tools.
 DEFAULT_OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-DEFAULT_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "qwen2.5-coder:7b")
+DEFAULT_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "hhao/qwen2.5-coder-tools:7b")
 DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
 DEFAULT_TEMPERATURE = float(os.environ.get("OLLAMA_AGENT_TEMPERATURE", "0.2"))
 DEFAULT_TOP_P = float(os.environ.get("OLLAMA_AGENT_TOP_P", "0.9"))

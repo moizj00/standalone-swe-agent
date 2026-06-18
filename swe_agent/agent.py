@@ -58,9 +58,16 @@ class Agent:
                 final = content
                 break
 
+            completed = None
             for call in calls:
                 obs = self._dispatch(call)
                 self.messages.append({"role": "tool", "tool_name": call["name"], "content": obs})
+                if call["name"] == "task_complete":
+                    completed = obs
+
+            if completed is not None:
+                final = completed
+                break
 
             self._maybe_compact()
         else:
