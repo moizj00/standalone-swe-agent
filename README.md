@@ -1,6 +1,6 @@
 # standalone swe_agent.py
 
-A standalone, autonomous SWE (Software Engineer) coding agent powered by Ollama (recommended: qwen2.5-coder:7b).
+A standalone, autonomous SWE (Software Engineer) coding agent powered by Ollama (recommended: hhao/qwen2.5-coder-tools:7b, a tool-calling-tuned coder model).
 
 This is a self-contained Python-based agent that implements a full ReAct-style tool-calling loop. It provides a comprehensive set of tools modeled after modern coding agents (Grok, Claude, etc.).
 
@@ -11,7 +11,7 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 - **Full tool suite** (~23 tools): file system ops (list, read, write, edit, delete, move, glob, info), advanced search (grep with context), rich execution (run_command/bash with background, timeout, description), todo management, git/patch helpers (apply_patch, git_status, git_diff, etc.), dedicated test runner, web research (search, open_page), and powerful sub-agent spawning (20+ simultaneous).
 - **Sub-agent isolation**: Each subagent has its own private message history and tool state. Main agent only sees spawn confirmation + clean summary result.
 - **One-line launcher**: `ollama-agent "your task here"`
-- **Ollama-native**: Uses Ollama's OpenAI-compatible API. Default model qwen2.5-coder:7b.
+- **Ollama-native**: Uses Ollama's native `/api/chat` API (sets `num_ctx`, streams tool calls). Default model hhao/qwen2.5-coder-tools:7b.
 - **Autonomous**: The LLM decides tool use, spawns subs for parallel work, manages todos, verifies changes.
 
 ## Quick Start
@@ -23,7 +23,7 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 
 2. Pull the recommended model:
    ```bash
-   ollama pull qwen2.5-coder:7b
+   ollama pull hhao/qwen2.5-coder-tools:7b
    ```
 
 3. Run the agent:
@@ -102,7 +102,7 @@ Spawn several sub-agents for different parts of the codebase, then collect summa
 
 - Python 3.8+
 - requests
-- Ollama (with qwen2.5-coder:7b recommended)
+- Ollama (with hhao/qwen2.5-coder-tools:7b recommended)
 
 Install Python deps:
 ```bash

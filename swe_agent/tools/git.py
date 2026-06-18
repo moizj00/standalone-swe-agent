@@ -64,6 +64,15 @@ def git_log(ctx: ToolContext, cwd: Optional[str] = None, max_count: int = 10) ->
     return _fmt(res) or "(no commits)"
 
 
+def git_show(ctx: ToolContext, ref: str = "HEAD", cwd: Optional[str] = None) -> str:
+    res = _run_git(ctx, ["show", str(ref)], cwd)
+    if res.returncode == 127:
+        return "Error: " + res.stderr
+    if res.returncode != 0:
+        return _fmt(res) or f"Error: could not show '{ref}'"
+    return _fmt(res) or f"(no output for {ref})"
+
+
 def git_commit(ctx: ToolContext, message: str, cwd: Optional[str] = None) -> str:
     add = _run_git(ctx, ["add", "-A"], cwd)
     if add.returncode == 127:
@@ -129,6 +138,16 @@ register(ToolSpec(
         "max_count": {"type": "integer", "default": 10},
     }, "required": []},
     impl=git_log, category="read",
+))
+
+register(ToolSpec(
+    name="git_show",
+    description="Show a commit's message, author, and diff (defaults to HEAD).",
+    parameters={"type": "object", "properties": {
+        "ref": {"type": "string", "description": "Commit ref (default: HEAD)"},
+        "cwd": {"type": "string"},
+    }, "required": []},
+    impl=git_show, category="read",
 ))
 
 register(ToolSpec(

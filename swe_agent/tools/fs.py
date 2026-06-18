@@ -229,6 +229,15 @@ def move_file(ctx: ToolContext, source: str, destination: str) -> str:
         return f"Error moving: {e}"
 
 
+def create_directory(ctx: ToolContext, path: str) -> str:
+    p = ctx.resolve(path)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return f"Created directory {path}"
+    except Exception as e:
+        return f"Error creating directory {path}: {e}"
+
+
 # --------------------------------------------------------------------------- registration
 
 register(ToolSpec(
@@ -329,4 +338,11 @@ register(ToolSpec(
         "destination": {"type": "string"},
     }, "required": ["source", "destination"]},
     impl=move_file, mutating=True, category="write",
+))
+
+register(ToolSpec(
+    name="create_directory",
+    description="Create a directory, including any missing parents. No error if it already exists.",
+    parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    impl=create_directory, mutating=True, category="write",
 ))
