@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# ollama-agent — one-line launcher for the local Ollama SWE coding agent
+#
+# Rich tools included (matching Grok + Claude Code):
+# - list_dir / glob / read_multiple / delete / move / get_file_info
+# - search_replace + apply_patch (excellent for git patches)
+# - run_command + bash (background, descriptions, timeouts)
+# - grep with context
+# - todo_write (planning & progress tracking)
+# - web_search + open_page
+#
+# Usage:
+#   ollama-agent "add type hints to all functions in src/"
+#   ollama-agent --model qwen2.5:7b "refactor the database layer"
+#   ollama-agent                 # interactive mode
+#
+# Defaults to the best coding model (qwen2.5-coder:7b) and ensures the server is running.
+# Set OLLAMA_AGENT_MODEL env var to override the default model.
+
+set -euo pipefail
+
+# Resolve the real location even if invoked via symlink (e.g. ~/.local/bin/ollama-agent)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
+ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
+
+# Prefer the coding-specialized model
+DEFAULT_MODEL="qwen2.5-coder:7b"
+MODEL="${OLLAMA_AGENT_MODEL:-$DEFAULT_MODEL}"
+
+# Ensure the Ollama server is up (idempotent)
+if [[ -x "$ENSURE_SCRIPT" ]]; then
+  "$ENSURE_SCRIPT" >/dev/null 2>&1 || true
+fi
+
+# Forward all arguments to the Python agent
+exec python3 "$PYTHON_AGENT" --model "$MODEL" "$@"
