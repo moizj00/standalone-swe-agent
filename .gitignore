@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.so
 .Python
 build/
@@ -39,3 +42,8 @@ venv.bak/
 *~
 .DS_Store
 Thumbs.db
+
+# web dashboard
+.env.local
+web/dist/
+web/src/data/tools.json

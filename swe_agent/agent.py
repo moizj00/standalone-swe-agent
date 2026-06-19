@@ -24,7 +24,8 @@ class Agent:
                  stream: bool = True, verbose: bool = True, max_steps: int = MAX_STEPS,
                  base_url: str = DEFAULT_OLLAMA_BASE, num_ctx: int = DEFAULT_NUM_CTX,
                  temperature: float = DEFAULT_TEMPERATURE,
-                 mock: Optional[Callable[[List[dict]], Tuple[str, List[dict]]]] = None):
+                 mock: Optional[Callable[[List[dict]], Tuple[str, List[dict]]]] = None,
+                 event_cb: Optional[Callable[[dict], None]] = None):
         self.model = model
         self.ctx = ctx
         self.stream = stream and mock is None
@@ -34,9 +35,22 @@ class Agent:
         self.num_ctx = num_ctx
         self.temperature = temperature
         self.mock = mock
+        # Optional structured-event sink. When set, the loop emits dicts describing
+        # tokens, tool-call lifecycle, steps, and the final answer -- this is how a
+        # non-stdout frontend (e.g. the HTTP/SSE server) observes a turn. The CLI
+        # leaves it None and keeps its stdout rendering (verbose=True) unchanged.
+        self.event_cb = event_cb
         self.messages: List[dict] = [{"role": "system", "content": system_prompt}]
         self.steps = 0
         self._prefix_printed = False
+
+    def _emit(self, event: dict) -> None:
+        if self.event_cb is None:
+            return
+        try:
+            self.event_cb(event)
+        except Exception:
+            pass  # an event sink must never break the agent loop
 
     # ------------------------------------------------------------------ public
 
@@ -47,11 +61,13 @@ class Agent:
         final = ""
         for step in range(1, self.max_steps + 1):
             self.steps += 1
+            self._emit({"type": "step", "n": step})
             if self.verbose:
                 print(f"\n\033[2m— step {step} —\033[0m")
             try:
                 content, calls = self._call_model()
             except Exception as e:
+                self._emit({"type": "error", "message": str(e)})
                 return f"[error calling model: {e}]"
 
             if not calls:
@@ -60,8 +76,11 @@ class Agent:
 
             completed = None
             for call in calls:
+                args = call.get("arguments") or {}
+                self._emit({"type": "tool_call", "name": call["name"], "arguments": args})
                 obs = self._dispatch(call)
                 self.messages.append({"role": "tool", "tool_name": call["name"], "content": obs})
+                self._emit({"type": "tool_result", "name": call["name"], "content": obs})
                 if call["name"] == "task_complete":
                     completed = obs
 
@@ -72,6 +91,7 @@ class Agent:
             self._maybe_compact()
         else:
             final = "(reached max steps without producing a final answer)"
+        self._emit({"type": "final", "text": final})
         return final
 
     # ------------------------------------------------------------------ model
@@ -83,17 +103,25 @@ class Agent:
         sys.stdout.write(piece)
         sys.stdout.flush()
 
+    def _token_handler(self, piece: str) -> None:
+        """Fan a streamed token out to stdout (CLI) and/or the event sink (server)."""
+        if self.verbose and self.stream:
+            self._print_token(piece)
+        self._emit({"type": "token", "text": piece})
+
     def _call_model(self) -> Tuple[str, List[dict]]:
         self._prefix_printed = False
+        want_tokens = False
         if self.mock is not None:
             content, raw = self.mock(self.messages)
             if self.verbose and content.strip():
                 print(f"\033[1massistant>\033[0m {content}")
         else:
+            want_tokens = self.stream and (self.verbose or self.event_cb is not None)
             content, raw = llm.chat(
                 self.messages, self.model, TOOLS, base_url=self.base_url,
                 num_ctx=self.num_ctx, temperature=self.temperature, stream=self.stream,
-                on_token=self._print_token if (self.verbose and self.stream) else None,
+                on_token=self._token_handler if want_tokens else None,
             )
             if self.verbose and self._prefix_printed:
                 sys.stdout.write("\n")
@@ -106,7 +134,7 @@ class Agent:
                 calls = recovered
                 content = cleaned
                 if self.verbose:
-                    print("  \033[2m(recovered tool call(s) from model text)\033[0m")
+                    print(f"  \033[2m(recovered {len(recovered)} tool call(s) from model text)\033[0m")
 
         assistant = {"role": "assistant", "content": content}
         if calls:
@@ -114,6 +142,11 @@ class Agent:
                 {"function": {"name": c["name"], "arguments": c["arguments"]}} for c in calls
             ]
         self.messages.append(assistant)
+        if content and not want_tokens:
+            # The step's full assistant text, for clients that don't consume the
+            # token stream. Suppressed when tokens were streamed (want_tokens) so
+            # `token` and `assistant` never describe the same text twice.
+            self._emit({"type": "assistant", "content": content})
         return content, calls
 
     # ------------------------------------------------------------------ tools
@@ -125,9 +158,14 @@ class Agent:
             dangerous = detect_danger(args.get("command", "")) or ""
 
         if mode == ApprovalMode.READ_ONLY:
-            if spec.mutating:
-                return False, (f"[blocked: plan/read-only mode] '{name}' is a mutating action and was "
-                               f"not executed. Investigate and present a plan instead.")
+            # Block mutations AND any code-executing tool. run_linter/run_type_checker
+            # are non-mutating but shell out to project-controlled binaries (eslint
+            # config, local node_modules/.bin, mypy plugins) — i.e. arbitrary code
+            # execution — so "read-only" must refuse them too, not just file writes.
+            if spec.mutating or spec.category == "exec":
+                return False, (f"[blocked: plan/read-only mode] '{name}' is a mutating or "
+                               f"code-executing action and was not executed. Investigate "
+                               f"with read-only tools and present a plan instead.")
             return True, None
         if mode == ApprovalMode.YOLO:
             return True, None

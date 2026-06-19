@@ -7,10 +7,13 @@ web_search uses a real provider when WEBSEARCH_API_KEY + WEBSEARCH_PROVIDER are 
 from __future__ import annotations
 
 import html
+import ipaddress
 import os
 import re
+import socket
 from html.parser import HTMLParser
 from typing import Optional
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -61,9 +64,60 @@ def html_to_text(markup: str) -> str:
     return parser.text()
 
 
+# --------------------------------------------------------------------------- SSRF guard
+
+def _ip_is_blocked(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
+def _ssrf_check(url: str) -> Optional[str]:
+    """Return a reason string if ``url`` must NOT be fetched (SSRF), else None.
+
+    Blocks non-http(s) schemes and any host that resolves to a loopback,
+    link-local (incl. the 169.254.169.254 cloud-metadata IP), private, reserved,
+    multicast, or unspecified address.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"refused: scheme '{parsed.scheme}' not allowed (http/https only)"
+    host = parsed.hostname
+    if not host:
+        return "refused: no host in URL"
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror:
+        return None  # let the request fail naturally with a DNS error
+    for info in infos:
+        ip = info[4][0]
+        if _ip_is_blocked(ip):
+            return f"refused: {host} resolves to internal address {ip} (SSRF guard)"
+    return None
+
+
+def _safe_get(url: str, max_redirects: int = 5):
+    """requests.get with redirects followed MANUALLY so every hop is SSRF-checked
+    (an allowed front door must not 30x-bounce into the internal range)."""
+    current = url
+    for _ in range(max_redirects + 1):
+        reason = _ssrf_check(current)
+        if reason:
+            raise ValueError(reason)
+        r = requests.get(current, timeout=20, headers=_HEADERS, allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+            current = urljoin(current, r.headers["Location"])
+            continue
+        return r
+    raise ValueError("too many redirects")
+
+
 def web_fetch(ctx: ToolContext, url: str) -> str:
     try:
-        r = requests.get(url, timeout=20, headers=_HEADERS, allow_redirects=True)
+        r = _safe_get(url)
         r.raise_for_status()
     except Exception as e:
         return f"Error fetching {url}: {e}"
