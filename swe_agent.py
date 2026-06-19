@@ -22,6 +22,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -34,9 +35,57 @@ import requests
 # ========================== CONFIG ==========================
 
 DEFAULT_OLLAMA_BASE = "http://localhost:11434/v1"
-DEFAULT_MODEL = "qwen2.5:7b"
+DEFAULT_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "qwen2.5:7b")
 MAX_STEPS = 25
-TIMEOUT = 120  # seconds for commands
+TIMEOUT = 120  # seconds for shell commands
+# HTTP read timeout for Ollama calls. The FIRST call cold-loads the model, which on
+# CPU-only hardware can take minutes, so this is generous by default (override with
+# OLLAMA_TIMEOUT). Subsequent calls run warm while the model stays resident.
+REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "600"))
+
+# Set by run_agent; consulted by BOTH the main loop and subagents so the
+# dangerous-command guard applies everywhere (subagents share the same tools).
+YOLO = False
+DANGEROUS_PATTERNS = ["rm -rf", "sudo ", ":(){", "mkfs", "shutdown", "reboot", "> /dev/", "git push --force"]
+
+
+def _is_dangerous(command: str) -> bool:
+    return any(pattern in command for pattern in DANGEROUS_PATTERNS)
+
+
+# The model the current run is using. Subagents inherit it so they don't fall back
+# to a hardcoded name that may not be installed. Set by run_agent().
+ACTIVE_MODEL = DEFAULT_MODEL
+
+# Preference order when auto-detecting a default model (coder-specialized first).
+PREFERRED_MODELS = ["qwen2.5-coder:7b", "qwen2.5:7b"]
+
+
+def _installed_models() -> List[str]:
+    """Names of models installed in Ollama, or [] if the server can't be reached."""
+    try:
+        native_base = DEFAULT_OLLAMA_BASE.split("/v1")[0]
+        resp = requests.get(f"{native_base}/api/tags", timeout=5)
+        resp.raise_for_status()
+        return [m.get("name", "") for m in resp.json().get("models", [])]
+    except Exception:
+        return []
+
+
+def _detect_default_model() -> str:
+    """Pick a default model from what's actually installed, preferring the coding
+    variant. OLLAMA_AGENT_MODEL overrides everything; falls back to qwen2.5:7b if the
+    Ollama server can't be queried (so the original 'default points at a missing
+    model' bug can't recur)."""
+    override = os.environ.get("OLLAMA_AGENT_MODEL")
+    if override:
+        return override
+    installed = _installed_models()
+    for name in PREFERRED_MODELS:
+        if name in installed:
+            return name
+    return installed[0] if installed else "qwen2.5:7b"
+
 
 # For subagent spawning - support 20+ simultaneous
 SUBAGENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=50)
@@ -327,22 +376,6 @@ TOOLS = [
             },
         },
     },
-    # === Patch / Git ===
-    {
-        "type": "function",
-        "function": {
-            "name": "apply_patch",
-            "description": "Apply a git-style unified diff patch. Great for complex changes from `git diff`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "patch": {"type": "string"},
-                    "path": {"type": "string", "description": "Target path (optional)"},
-                },
-                "required": ["patch"],
-            },
-        },
-    },
     # === Research (Grok style) ===
     {
         "type": "function",
@@ -511,9 +544,10 @@ def list_dir(path: str = ".", recursive: bool = False) -> str:
 def glob(pattern: str, path: str = ".") -> str:
     try:
         base = Path(path).resolve()
-        matches = [str(m.relative_to(base)) for m in base.glob(pattern) if m.is_file() or m.is_dir()]
-        matches += [str(m.relative_to(base)) for m in base.rglob(pattern) if m.is_file() or m.is_dir() and "**" in pattern]
-        matches = sorted(set(matches))
+        # Path.glob already handles recursive `**` patterns (e.g. '**/*.py'), so a
+        # single glob() call is correct. The old rglob union had an operator-precedence
+        # bug (`a or b and c` == `a or (b and c)`) that pulled in unintended matches.
+        matches = sorted({str(m.relative_to(base)) for m in base.glob(pattern)})
         return "\n".join(matches) if matches else f"No files matched: {pattern}"
     except Exception as e:
         return f"Error in glob: {e}"
@@ -659,10 +693,12 @@ def run_command(command: str, cwd: Optional[str] = None, description: Optional[s
         desc = description or command
 
         if background:
-            # Simple background
-            full_cmd = f"cd {workdir} && nohup {command} > /tmp/agent_bg.log 2>&1 & echo $!"
-            result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True, timeout=10)
-            return f"[BACKGROUND] {desc}\nStarted with pid: {result.stdout.strip()}\nLog: /tmp/agent_bg.log"
+            # Run detached in `workdir` (passed via cwd= so paths containing spaces work),
+            # logging to a unique file so concurrent background commands don't clobber it.
+            log_path = f"/tmp/agent_bg_{uuid.uuid4().hex[:8]}.log"
+            full_cmd = f"nohup {command} > {shlex.quote(log_path)} 2>&1 & echo $!"
+            result = subprocess.run(full_cmd, shell=True, cwd=workdir, capture_output=True, text=True, timeout=10)
+            return f"[BACKGROUND] {desc}\nStarted with pid: {result.stdout.strip()}\nLog: {log_path}"
 
         result = subprocess.run(
             command,
@@ -705,20 +741,21 @@ def todo_write(todos: List[Dict]) -> str:
 
 
 def apply_patch(patch: str, path: Optional[str] = None) -> str:
-    """Apply a unified diff patch using `patch` or `git apply` if available."""
+    """Apply a unified diff patch using `git apply` or `patch`, run inside `workdir`."""
     try:
         workdir = path or "."
-        # Try git apply first
-        cmd = f"cd {workdir} && git apply -"
+        # Fixed argv + cwd= (no shell, no `cd`): handles directories containing spaces
+        # and avoids any shell interpretation of the patch contents.
         result = subprocess.run(
-            cmd, input=patch, shell=True, capture_output=True, text=True, timeout=30
+            ["git", "apply", "-"], input=patch, cwd=workdir,
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
             return "Patch applied successfully with git apply"
-        # Fallback to patch command
-        cmd = f"cd {workdir} && patch -p1"
+        # Fallback to the patch command
         result = subprocess.run(
-            cmd, input=patch, shell=True, capture_output=True, text=True, timeout=30
+            ["patch", "-p1"], input=patch, cwd=workdir,
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
             return "Patch applied with patch -p1"
@@ -754,52 +791,87 @@ def open_page(url: str) -> str:
         return f"Error fetching {url}: {e}"
 
 
+# Tools that accept an explicit `cwd` argument (command / git / test helpers).
+_CWD_TOOLS = {"run_command", "bash", "git_status", "git_diff", "git_log", "git_commit", "run_tests"}
+
+
+def _rebase_tool_args(name: str, args: Dict[str, Any], base: str) -> Dict[str, Any]:
+    """Resolve a tool call's relative path arguments against `base`, and default its
+    `cwd` to `base`, so a subagent can work in its own directory WITHOUT calling
+    os.chdir() — which is process-global and would race across the parallel subagent
+    threads (and corrupt the main agent's cwd). No-op when base is '.' or empty."""
+    if not base or base == ".":
+        return args
+    base_path = Path(base)
+
+    def rebase(value: str) -> str:
+        p = Path(value)
+        return value if p.is_absolute() else str(base_path / p)
+
+    out = dict(args)
+    for key in ("path", "source", "destination"):
+        if isinstance(out.get(key), str):
+            out[key] = rebase(out[key])
+    if isinstance(out.get("paths"), list):
+        out["paths"] = [rebase(p) if isinstance(p, str) else p for p in out["paths"]]
+    if name in _CWD_TOOLS and not out.get("cwd"):
+        out["cwd"] = str(base_path)
+    return out
+
+
 def _execute_subagent_task(task: str, description: str, model: str, cwd: str) -> str:
-    """Internal: run a full sub-agent loop for a task (limited steps for safety)."""
-    original_cwd = os.getcwd()
-    if cwd and os.path.exists(cwd):
-        os.chdir(cwd)
-    try:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"[SUB-AGENT] {description}\n\n{task}\n\nWork autonomously using your tools. When done, give a clear summary."}
-        ]
-        for _ in range(15):  # sub-agents get fewer steps to stay focused
+    """Internal: run a full sub-agent loop for a task (limited steps for safety).
+
+    Subagents run concurrently in a thread pool, so this MUST NOT mutate the
+    process-global working directory (os.chdir) — that races across threads and would
+    corrupt sibling subagents and the main agent. Instead we resolve each tool call's
+    relative paths against `cwd` via _rebase_tool_args.
+    """
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"[SUB-AGENT] {description}\n\n{task}\n\nWork autonomously using your tools. When done, give a clear summary."}
+    ]
+    for _ in range(15):  # sub-agents get fewer steps to stay focused
+        try:
+            resp = chat_with_ollama(messages, model, DEFAULT_OLLAMA_BASE)
+        except Exception as e:
+            return f"Sub-agent LLM error: {e}"
+        msg = resp["choices"][0]["message"]
+        messages.append(msg)
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            return f"Sub-agent completed: {content or 'No final text.'}"
+        for tc in tool_calls:
+            fn = tc["function"]
+            name = fn["name"]
             try:
-                resp = chat_with_ollama(messages, model, DEFAULT_OLLAMA_BASE)
-            except Exception as e:
-                return f"Sub-agent LLM error: {e}"
-            msg = resp["choices"][0]["message"]
-            messages.append(msg)
-            content = msg.get("content") or ""
-            tool_calls = msg.get("tool_calls") or []
-            if not tool_calls:
-                return f"Sub-agent completed: {content or 'No final text.'}"
-            for tc in tool_calls:
-                fn = tc["function"]
-                name = fn["name"]
-                args = json.loads(fn["arguments"] or "{}")
-                if name in TOOL_IMPLEMENTATIONS:
-                    try:
-                        obs = str(TOOL_IMPLEMENTATIONS[name](**args))[:3000]
-                    except Exception as ex:
-                        obs = f"Tool {name} error: {ex}"
-                else:
-                    obs = f"Unknown tool: {name}"
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": obs
-                })
-        return "Sub-agent reached step limit. Last content: " + (messages[-1].get("content") or "")
-    finally:
-        os.chdir(original_cwd)
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError as ex:
+                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                 "content": f"Error: could not parse arguments for {name}: {ex}"})
+                continue
+            if name not in TOOL_IMPLEMENTATIONS:
+                obs = f"Unknown tool: {name}"
+            elif name in ("run_command", "bash") and not YOLO and _is_dangerous(args.get("command", "")):
+                obs = "Command was blocked for safety (subagent). Re-run the agent with --yolo to allow."
+            else:
+                try:
+                    obs = str(TOOL_IMPLEMENTATIONS[name](**_rebase_tool_args(name, args, cwd)))[:3000]
+                except Exception as ex:
+                    obs = f"Tool {name} error: {ex}"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": obs
+            })
+    return "Sub-agent reached step limit. Last content: " + (messages[-1].get("content") or "")
 
 
 def spawn_subagent(task: str, description: str, model: Optional[str] = None, cwd: Optional[str] = None) -> str:
     """Spawn sub-agent in parallel thread. Supports 20+ concurrent via executor."""
     sub_id = str(uuid.uuid4())[:8]
-    use_model = model or "qwen2.5-coder:7b"
+    use_model = model or ACTIVE_MODEL
     use_cwd = cwd or "."
     future = SUBAGENT_EXECUTOR.submit(_execute_subagent_task, task, description, use_model, use_cwd)
     SUBAGENT_RESULTS[sub_id] = future
@@ -899,7 +971,7 @@ def chat_with_ollama(messages: List[Dict], model: str, base_url: str) -> Dict[st
         "temperature": 0.2,
         "stream": False,
     }
-    resp = requests.post(url, json=payload, timeout=180)
+    resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
@@ -907,6 +979,9 @@ def chat_with_ollama(messages: List[Dict], model: str, base_url: str) -> Dict[st
 # ========================== MAIN AGENT LOOP ==========================
 
 def run_agent(task: str, model: str, base_url: str, yolo: bool = False, cwd: Optional[str] = None):
+    global YOLO, ACTIVE_MODEL
+    YOLO = yolo
+    ACTIVE_MODEL = model
     if cwd:
         os.chdir(cwd)
         print(f"Working directory: {os.getcwd()}")
@@ -944,22 +1019,31 @@ def run_agent(task: str, model: str, base_url: str, yolo: bool = False, cwd: Opt
         for tool_call in tool_calls:
             fn = tool_call["function"]
             name = fn["name"]
-            args = json.loads(fn["arguments"] or "{}")
-            tool_call_id = tool_call["id"]
+            tool_call_id = tool_call.get("id", "")
+
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError as e:
+                observation = f"Error: could not parse arguments for {name}: {e}"
+                print(f"\n▶ Tool: {name}(<unparseable arguments>)")
+                print(f"◀ Observation:\n{textwrap.indent(observation, '   ')}")
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": observation})
+                continue
 
             print(f"\n▶ Tool: {name}({args})")
 
-            # Safety for shell commands
-            if name in ("run_command", "bash") and not yolo:
-                cmd = args.get("command", "")
-                dangerous = ["rm -rf", "sudo ", ":(){", "mkfs", "shutdown", "reboot", "> /dev/", "git push --force"]
-                if any(d in cmd for d in dangerous):
-                    print("⚠️  Potentially dangerous command blocked. Use --yolo to allow.")
-                    observation = "Command was blocked for safety. Ask the user for confirmation."
-                else:
-                    observation = TOOL_IMPLEMENTATIONS[name](**args)
+            # Unknown tool, dangerous-command guard, then execute — each path returns a
+            # tool observation instead of letting an exception kill the whole agent loop.
+            if name not in TOOL_IMPLEMENTATIONS:
+                observation = f"Unknown tool: {name}"
+            elif name in ("run_command", "bash") and not yolo and _is_dangerous(args.get("command", "")):
+                print("⚠️  Potentially dangerous command blocked. Use --yolo to allow.")
+                observation = "Command was blocked for safety. Ask the user for confirmation."
             else:
-                observation = TOOL_IMPLEMENTATIONS[name](**args)
+                try:
+                    observation = str(TOOL_IMPLEMENTATIONS[name](**args))
+                except Exception as ex:
+                    observation = f"Tool {name} error: {ex}"
 
             # Truncate very long observations
             if len(observation) > 8000:
