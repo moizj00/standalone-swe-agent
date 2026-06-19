@@ -49,11 +49,15 @@ socket.getaddrinfo = _pinning_getaddrinfo  # installed once; inert unless _pin.m
 
 
 def ip_is_blocked(ip: str) -> bool:
-    """True if ip is loopback/link-local/private/reserved/multicast/unspecified."""
+    """True if ip is not safe to fetch (any non-globally-routable address)."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    # Anything not globally routable is an SSRF target. is_global also catches the
+    # 100.64.0.0/10 CGNAT/shared range, which is neither is_private nor is_reserved.
+    if not getattr(addr, "is_global", True):
+        return True
     return (addr.is_private or addr.is_loopback or addr.is_link_local
             or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
 

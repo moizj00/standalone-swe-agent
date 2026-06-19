@@ -184,7 +184,8 @@ export function validateDraft(
     errors.push('Tool name is required.');
   } else if (!NAME_RE.test(name)) {
     errors.push('Tool name must start with a letter/underscore and contain only letters, digits, and underscores.');
-  } else if (schemas.some(s => s.name === name && s.id !== editingId)) {
+  } else if (schemas.some(s => s.name.trim() === name && s.id !== editingId)) {
+    // compare TRIMMED — the payload trims names, so "foo " and "foo" collide server-side
     errors.push(`A tool named "${name}" already exists.`);
   } else if (builtinNames.has(name)) {
     // mirror the server: a custom tool can't shadow a built-in agent tool
@@ -218,6 +219,11 @@ export function validateDraft(
     } else if (!/^https?:\/\//i.test(url)) {
       errors.push('Endpoint URL must start with http:// or https://.');
     }
+    // mirror the server: placeholders are not allowed in the scheme/authority
+    const authority = url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/);
+    if (authority && authority[1].includes('{')) {
+      errors.push('URL placeholders are only allowed in the path/query, not the host.');
+    }
     const declared = new Set(draft.parameters.map(p => p.name.trim()).filter(Boolean));
     const placeholders = new Set(urlPlaceholders(url));
     for (const ph of placeholders) {
@@ -228,6 +234,19 @@ export function validateDraft(
       const pn = p.name.trim();
       if (pn && p.location === 'path' && !placeholders.has(pn)) {
         errors.push(`Parameter "${pn}" is set to 'path' but the URL has no "{${pn}}" placeholder.`);
+      }
+    });
+    // mirror the server: a 'header' param can't collide with a configured/auth header
+    const reservedHeaders = new Set<string>();
+    draft.http.headers.forEach(h => { if (h.key.trim()) reservedHeaders.add(h.key.trim().toLowerCase()); });
+    if (draft.http.auth?.type === 'bearer') reservedHeaders.add('authorization');
+    if (draft.http.auth?.type === 'header' && draft.http.auth.key?.trim()) {
+      reservedHeaders.add(draft.http.auth.key.trim().toLowerCase());
+    }
+    draft.parameters.forEach(p => {
+      const pn = p.name.trim();
+      if (pn && p.location === 'header' && reservedHeaders.has(pn.toLowerCase())) {
+        errors.push(`Parameter "${pn}" (header) collides with a configured/auth header.`);
       }
     });
     draft.http.headers.forEach(h => {

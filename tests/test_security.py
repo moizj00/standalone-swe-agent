@@ -48,6 +48,7 @@ def test_unconfined_allows_absolute(tmp_path):
     ("10.1.2.3", True),
     ("192.168.0.5", True),
     ("172.16.9.9", True),
+    ("100.64.0.1", True),        # CGNAT / RFC 6598 shared address space (non-global)
     ("::1", True),
     ("8.8.8.8", False),
     ("93.184.216.34", False),
