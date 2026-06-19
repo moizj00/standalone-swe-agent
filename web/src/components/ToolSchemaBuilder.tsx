@@ -7,8 +7,8 @@ import { cn } from '../utils';
 import { useToolSchemas } from '../store/ToolSchemasProvider';
 import {
   DraftSchema, HTTP_METHODS, HttpMethod, PARAM_LOCATIONS, PARAM_TYPES, ParamLocation,
-  ParamType, emptyDraft, emptyHttp, emptyParameter, exportDeclarations, makeId,
-  toFunctionDeclaration, validateDraft,
+  ParamType, ToolParameter, emptyDraft, emptyHttp, emptyParameter, exportDeclarations,
+  makeId, toFunctionDeclaration, validateDraft,
 } from '../store/toolSchemas';
 
 /**
@@ -50,6 +50,15 @@ export const ToolSchemaBuilder = () => {
       name: s.name,
       description: s.description,
       parameters: s.parameters.map(p => ({ ...p })),
+      // preserve endpoint config — otherwise saving an edit would drop it and the
+      // tool would silently become non-callable
+      http: s.http
+        ? {
+            ...s.http,
+            headers: s.http.headers.map(h => ({ ...h })),
+            auth: s.http.auth ? { ...s.http.auth } : undefined,
+          }
+        : undefined,
     });
   };
 
@@ -70,7 +79,7 @@ export const ToolSchemaBuilder = () => {
   const addParam = () =>
     setDraft(d => (d ? { ...d, parameters: [...d.parameters, emptyParameter()] } : d));
 
-  const updateParam = (pid: string, patch: Partial<{ name: string; type: ParamType; description: string; required: boolean }>) =>
+  const updateParam = (pid: string, patch: Partial<ToolParameter>) =>
     setDraft(d => (d ? { ...d, parameters: d.parameters.map(p => (p.id === pid ? { ...p, ...patch } : p)) } : d));
 
   const removeParam = (pid: string) =>

@@ -32,18 +32,21 @@ def ip_is_blocked(ip: str) -> bool:
 def ssrf_check(url: str) -> Optional[str]:
     """Return a reason string if ``url`` must NOT be fetched (SSRF), else None.
 
-    Blocks non-http(s) schemes and any host that resolves to a loopback,
-    link-local (incl. the 169.254.169.254 cloud-metadata IP), private, reserved,
-    multicast, or unspecified address.
+    Blocks malformed URLs, non-http(s) schemes, and any host that resolves to a
+    loopback, link-local (incl. the 169.254.169.254 cloud-metadata IP), private,
+    reserved, multicast, or unspecified address.
     """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return f"refused: scheme '{parsed.scheme}' not allowed (http/https only)"
-    host = parsed.hostname
+    try:
+        parsed = urlparse(url)
+        scheme, host, port = parsed.scheme, parsed.hostname, parsed.port
+    except ValueError:
+        return "refused: malformed URL"
+    if scheme not in ("http", "https"):
+        return f"refused: scheme '{scheme}' not allowed (http/https only)"
     if not host:
         return "refused: no host in URL"
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port or (443 if scheme == "https" else 80))
     except socket.gaierror:
         return None  # let the request fail naturally with a DNS error
     for info in infos:
@@ -53,6 +56,15 @@ def ssrf_check(url: str) -> Optional[str]:
     return None
 
 
+def _origin(url: str):
+    """(scheme, host, port) for redirect same-origin checks; None if unparseable."""
+    try:
+        p = urlparse(url)
+        return (p.scheme, p.hostname, p.port)
+    except ValueError:
+        return None
+
+
 def safe_request(method: str, url: str, *, headers: Optional[dict] = None,
                  params: Optional[dict] = None, json: Optional[dict] = None,
                  timeout: int = DEFAULT_TIMEOUT, max_redirects: int = MAX_REDIRECTS):
@@ -60,14 +72,20 @@ def safe_request(method: str, url: str, *, headers: Optional[dict] = None,
     SSRF-checked (an allowed front door must not 30x-bounce into the internal
     range). Returns the final ``requests.Response``; raises ValueError on an SSRF
     refusal or too many redirects."""
-    merged = {**DEFAULT_HEADERS, **(headers or {})}
+    caller_headers = headers or {}
+    base_origin = _origin(url)
     current = url
     body = json
     for _ in range(max_redirects + 1):
         reason = ssrf_check(current)
         if reason:
             raise ValueError(reason)
-        r = requests.request(method.upper(), current, headers=merged, params=params,
+        # Only send caller-supplied headers (which may carry bearer tokens / API
+        # keys) on a same-origin hop. A redirect to another host gets the default
+        # UA only, so a 3xx can't exfiltrate the custom tool's secrets.
+        same_origin = base_origin is not None and _origin(current) == base_origin
+        req_headers = {**DEFAULT_HEADERS, **(caller_headers if same_origin else {})}
+        r = requests.request(method.upper(), current, headers=req_headers, params=params,
                              json=body, timeout=timeout, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
             current = urljoin(current, r.headers["Location"])

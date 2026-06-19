@@ -14,13 +14,13 @@ from swe_agent.tools.base import ToolContext
 from swe_agent.tools.exec import BackgroundRegistry
 
 
-def _fake_resp(status=200, text="ok"):
+def _fake_resp(status=200, text="ok", location=None):
     class R:
         pass
     r = R()
     r.status_code = status
     r.text = text
-    r.headers = {}
+    r.headers = {"Location": location} if location else {}
     return r
 
 
@@ -60,6 +60,19 @@ def test_validate_bad_method_and_location():
                                 "http": {"method": "FETCH", "url": "https://a.com",
                                          "param_location": {"p": "cookie"}}})
     assert any("method" in e for e in errs) and any("location" in e for e in errs)
+
+
+def test_validate_rejects_shadow_of_builtin():
+    errs = custom.validate_def({"name": "read_file", "description": "d"})
+    assert any("shadow" in e for e in errs)
+
+
+def test_validate_malformed_url_does_not_raise():
+    # a non-numeric port used to raise ValueError out of ssrf_check; must now be a
+    # collected validation error instead of tearing down the request.
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "http": {"method": "GET", "url": "http://example.com:notaport/"}})
+    assert errs  # returned, not raised
 
 
 def test_build_toolspecs_duplicate_and_cap():
@@ -124,6 +137,36 @@ def test_executor_ssrf_refusal_surfaces(monkeypatch, tmp_path):
     monkeypatch.setattr(custom, "safe_request", boom)
     out = spec.impl(_ctx(tmp_path))
     assert "Error calling" in out and "SSRF" in out
+
+
+def test_response_redacts_configured_secrets(monkeypatch, tmp_path):
+    monkeypatch.setattr(custom, "safe_request",
+                        lambda method, url, **kw: _fake_resp(200, "you sent Bearer SUPERSECRET and key APIKEY123"))
+    spec = custom.build_toolspec({"name": "f", "description": "d", "http": {
+        "method": "GET", "url": "https://api.x",
+        "headers": {"X-Api-Key": "APIKEY123"},
+        "auth": {"type": "bearer", "token": "SUPERSECRET"}}})
+    out = spec.impl(_ctx(tmp_path))
+    assert "SUPERSECRET" not in out and "APIKEY123" not in out and "REDACTED" in out
+
+
+def test_safe_request_strips_auth_on_cross_origin_redirect(monkeypatch):
+    from swe_agent.tools import _net
+    monkeypatch.setattr(_net, "ssrf_check", lambda url: None)  # avoid DNS in the test
+    seen = []
+
+    def fake_request(method, url, headers=None, **kw):
+        seen.append((url, headers or {}))
+        if len(seen) == 1:
+            return _fake_resp(302, "", location="https://other.example/next")
+        return _fake_resp(200, "ok")
+
+    monkeypatch.setattr(_net.requests, "request", fake_request)
+    _net.safe_request("GET", "https://api.example/start",
+                      headers={"Authorization": "Bearer T", "X-Api-Key": "K"})
+    assert seen[0][1].get("Authorization") == "Bearer T"          # same-origin hop keeps auth
+    assert "Authorization" not in seen[1][1] and "X-Api-Key" not in seen[1][1]  # cross-origin stripped
+    assert "User-Agent" in seen[1][1]                             # default UA still sent
 
 
 def test_executor_hides_transport_secrets(monkeypatch, tmp_path):

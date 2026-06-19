@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from ._net import safe_request, ssrf_check
-from .base import ToolContext, ToolSpec
+from .base import REGISTRY, ToolContext, ToolSpec
 
 NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -74,6 +74,10 @@ def validate_def(defn: dict) -> List[str]:
     name = defn.get("name")
     if not isinstance(name, str) or not NAME_RE.match(name):
         errors.append(f"invalid tool name: {name!r}")
+    elif name in REGISTRY:
+        # A custom tool that reuses a built-in name would be shadowed: dispatch
+        # resolves the global registry first, so the HTTP executor never runs.
+        errors.append(f"tool name {name!r} shadows a built-in tool; choose another")
     if not isinstance(defn.get("description"), str) or not defn["description"].strip():
         errors.append(f"tool {name!r} needs a description")
 
@@ -88,8 +92,13 @@ def validate_def(defn: dict) -> List[str]:
             url = http.get("url")
             if not isinstance(url, str) or not url.strip():
                 errors.append(f"tool {name!r}: http.url is required")
-            elif (reason := ssrf_check(_strip_placeholders(url))):
-                errors.append(f"tool {name!r}: {reason}")
+            else:
+                try:
+                    reason = ssrf_check(_strip_placeholders(url))
+                except ValueError:
+                    reason = "malformed URL"
+                if reason:
+                    errors.append(f"tool {name!r}: {reason}")
             loc = http.get("param_location") or {}
             if isinstance(loc, dict):
                 for pname, where in loc.items():
@@ -148,6 +157,29 @@ def _render(defn: dict, args: dict) -> Tuple[str, dict, dict, Optional[dict]]:
     return url, query, headers, (body or None)
 
 
+def _collect_secrets(http: dict) -> List[str]:
+    """Configured credential strings (auth token/value + header values) to redact
+    if the endpoint echoes them back in its response body."""
+    secrets: List[str] = []
+    auth = http.get("auth") or {}
+    if isinstance(auth, dict):
+        for k in ("token", "value"):
+            v = auth.get(k)
+            if isinstance(v, str) and len(v) >= 4:
+                secrets.append(v)
+    for v in (http.get("headers") or {}).values():
+        if isinstance(v, str) and len(v) >= 4:
+            secrets.append(v)
+    return secrets
+
+
+def _redact(text: str, secrets: List[str]) -> str:
+    for s in secrets:
+        if s and s in text:
+            text = text.replace(s, "***REDACTED***")
+    return text
+
+
 def build_toolspec(defn: dict) -> ToolSpec:
     """Turn a validated custom-tool definition into a runnable ToolSpec."""
     name = defn["name"]
@@ -156,6 +188,7 @@ def build_toolspec(defn: dict) -> ToolSpec:
     http = defn.get("http") or {}
     method = str(http.get("method", "GET")).upper()
     has_endpoint = bool(http.get("url"))
+    secrets = _collect_secrets(http)
 
     def impl(ctx: ToolContext, **args) -> str:
         if not has_endpoint:
@@ -170,6 +203,7 @@ def build_toolspec(defn: dict) -> ToolSpec:
         text = r.text or ""
         if len(text) > MAX_RESPONSE_CHARS:
             text = text[:MAX_RESPONSE_CHARS] + f"\n... (truncated; {len(r.text) - MAX_RESPONSE_CHARS} more chars)"
+        text = _redact(text, secrets)  # an endpoint that echoes our headers/auth must not leak them
         return f"[{name}] HTTP {r.status_code}\n{text}".strip()
 
     return ToolSpec(

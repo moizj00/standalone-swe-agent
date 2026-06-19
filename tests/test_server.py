@@ -187,6 +187,15 @@ def test_custom_tools_internal_url_rejected(srv):
     assert r.status_code == 400
 
 
+def test_custom_tools_shadow_builtin_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "read_file", "description": "d",
+                                 "http": {"method": "GET", "url": "https://api.example.com/x"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+    assert "shadow" in r.json()["error"]
+
+
 def test_custom_tools_valid_accepted(srv):
     payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
                "custom_tools": [{"name": "get_x", "description": "d",
