@@ -153,6 +153,60 @@ def test_required_argument_enforced(monkeypatch, tmp_path):
     assert "missing required" in out and called["n"] == 0  # request never sent
 
 
+def test_validate_non_object_parameters():
+    errs = custom.validate_def({"name": "x", "description": "d", "parameters": "oops",
+                                "http": {"method": "GET", "url": "https://api.x"}})
+    assert any("parameters must be an object" in e for e in errs)
+
+
+def test_build_toolspecs_non_object_parameters_no_crash():
+    specs, errs = custom.build_toolspecs(
+        [{"name": "x", "description": "d", "parameters": "oops", "http": {"method": "GET", "url": "https://api.x"}}])
+    assert errs and "x" not in specs  # validation error, not AttributeError
+
+
+def test_ctx_parameter_does_not_collide(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(custom, "safe_request", lambda method, url, **kw: seen.update(kw=kw) or _fake_resp(200, "ok"))
+    spec = custom.build_toolspec({"name": "f", "description": "d", "parameters": _params("ctx"),
+                                  "http": {"method": "GET", "url": "https://api.x"}})
+    out = spec.impl(_ctx(tmp_path), ctx="hello")  # must NOT raise "multiple values for ctx"
+    assert "HTTP 200" in out and seen["kw"]["params"] == {"ctx": "hello"}
+
+
+def test_optional_path_placeholder_unresolved_errors(monkeypatch, tmp_path):
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return _fake_resp(200, "ok")
+
+    monkeypatch.setattr(custom, "safe_request", fake)
+    spec = custom.build_toolspec({"name": "f", "description": "d",
+                                  "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},  # id optional
+                                  "http": {"method": "GET", "url": "https://api.x/users/{id}", "param_location": {"id": "path"}}})
+    out = spec.impl(_ctx(tmp_path))  # id omitted -> literal {id} would remain
+    assert "URL placeholder" in out and called["n"] == 0
+
+
+def test_safe_request_same_origin_302_keeps_params_converts_to_get(monkeypatch):
+    from swe_agent.tools import _net
+    monkeypatch.setattr(_net, "ssrf_check", lambda url: None)
+    seen = []
+
+    def fake_request(method, url, headers=None, params=None, json=None, **kw):
+        seen.append({"method": method, "params": params, "json": json})
+        if len(seen) == 1:
+            return _fake_resp(302, "", location="https://api.example/search/")  # same origin
+        return _fake_resp(200, "ok")
+
+    monkeypatch.setattr(_net.requests, "request", fake_request)
+    _net.safe_request("POST", "https://api.example/search", params={"q": "x"}, json={"b": 1})
+    assert seen[0]["params"] == {"q": "x"} and seen[0]["json"] == {"b": 1} and seen[0]["method"] == "POST"
+    # same-origin hop: query preserved, 302 converts POST->GET and drops body
+    assert seen[1]["params"] == {"q": "x"} and seen[1]["method"] == "GET" and seen[1]["json"] is None
+
+
 def test_validate_non_dict_headers():
     errs = custom.validate_def({"name": "x", "description": "d",
                                 "http": {"method": "GET", "url": "https://api.x", "headers": ["bad"]}})

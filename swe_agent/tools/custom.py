@@ -65,6 +65,20 @@ def _normalize_parameters(params) -> dict:
     return out
 
 
+def _param_props(defn: dict) -> dict:
+    """Safely extract parameters.properties (a possibly-malicious payload may set
+    parameters/properties to a non-object)."""
+    p = defn.get("parameters")
+    props = p.get("properties") if isinstance(p, dict) else None
+    return props if isinstance(props, dict) else {}
+
+
+def _param_required(defn: dict) -> List[str]:
+    p = defn.get("parameters")
+    req = p.get("required") if isinstance(p, dict) else None
+    return [str(r) for r in req] if isinstance(req, list) else []
+
+
 def validate_def(defn: dict) -> List[str]:
     """Return human-readable validation errors for one custom-tool definition."""
     errors: List[str] = []
@@ -80,6 +94,13 @@ def validate_def(defn: dict) -> List[str]:
         errors.append(f"tool name {name!r} shadows a built-in tool; choose another")
     if not isinstance(defn.get("description"), str) or not defn["description"].strip():
         errors.append(f"tool {name!r} needs a description")
+
+    params = defn.get("parameters")
+    if params is not None and not isinstance(params, dict):
+        errors.append(f"tool {name!r}: parameters must be an object")
+    elif isinstance(params, dict) and params.get("properties") is not None \
+            and not isinstance(params.get("properties"), dict):
+        errors.append(f"tool {name!r}: parameters.properties must be an object")
 
     http = defn.get("http")
     if http is not None:
@@ -107,7 +128,7 @@ def validate_def(defn: dict) -> List[str]:
                     errors.append(f"tool {name!r}: URL placeholders are only allowed in the path/query, not the host")
                 # Every {placeholder} must map to a declared parameter, or _render
                 # filters the (undeclared) arg out and the literal {x} URL is called.
-                declared = set((defn.get("parameters") or {}).get("properties") or {})
+                declared = set(_param_props(defn))
                 for ph in _PLACEHOLDER_RE.findall(url):
                     if ph not in declared:
                         errors.append(f"tool {name!r}: URL placeholder '{{{ph}}}' has no matching parameter")
@@ -160,7 +181,7 @@ def _render(defn: dict, args: dict) -> Tuple[str, dict, dict, Optional[dict]]:
 
     # Only forward arguments the operator actually declared — a hallucinated field
     # (e.g. admin=true / delete_all=true) must never become a real request param.
-    declared = set((defn.get("parameters") or {}).get("properties") or {})
+    declared = set(_param_props(defn))
     args = {k: v for k, v in args.items() if k in declared}
 
     # path params first (substitute {name}); the rest go to query/body/header
@@ -217,9 +238,12 @@ def build_toolspec(defn: dict) -> ToolSpec:
     method = str(http.get("method", "GET")).upper()
     has_endpoint = bool(http.get("url"))
     secrets = _collect_secrets(http)
-    required = [str(r) for r in ((defn.get("parameters") or {}).get("required") or [])]
+    required = _param_required(defn)
 
-    def impl(ctx: ToolContext, **args) -> str:
+    # NB: first param is `_ctx`, not `ctx` — _dispatch calls impl(self.ctx, **args)
+    # positionally, so a custom tool with a declared `ctx` parameter must not
+    # collide with it (it flows through **args instead).
+    def impl(_ctx: ToolContext, **args) -> str:
         if not has_endpoint:
             return f"[custom tool '{name}' has no endpoint configured]"
         missing = [r for r in required if r not in args]
@@ -229,6 +253,12 @@ def build_toolspec(defn: dict) -> ToolSpec:
             return f"Error calling '{name}': missing required argument(s): {', '.join(missing)}"
         try:
             url, query, headers, body = _render(defn, args)
+            leftover = _PLACEHOLDER_RE.findall(url)
+            if leftover:
+                # an optional path param the model omitted would leave a literal {x}
+                # in the URL — refuse rather than hit the wrong endpoint.
+                return (f"Error calling '{name}': missing argument(s) for URL placeholder(s): "
+                        + ", ".join("{" + p + "}" for p in leftover))
             r = safe_request(method, url, headers=headers, params=query or None, json=body)
         except ValueError as e:        # SSRF / redirect refusal — safe to show
             return f"Error calling '{name}': {e}"
