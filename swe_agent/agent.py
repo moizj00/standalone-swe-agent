@@ -25,7 +25,8 @@ class Agent:
                  base_url: str = DEFAULT_OLLAMA_BASE, num_ctx: int = DEFAULT_NUM_CTX,
                  temperature: float = DEFAULT_TEMPERATURE,
                  mock: Optional[Callable[[List[dict]], Tuple[str, List[dict]]]] = None,
-                 event_cb: Optional[Callable[[dict], None]] = None):
+                 event_cb: Optional[Callable[[dict], None]] = None,
+                 extra_tools: Optional[dict] = None):
         self.model = model
         self.ctx = ctx
         self.stream = stream and mock is None
@@ -40,6 +41,10 @@ class Agent:
         # non-stdout frontend (e.g. the HTTP/SSE server) observes a turn. The CLI
         # leaves it None and keeps its stdout rendering (verbose=True) unchanged.
         self.event_cb = event_cb
+        # Per-session custom tools (name -> ToolSpec), injected at runtime (e.g. by
+        # the HTTP server from the chat request). These are advertised to the model
+        # and dispatchable alongside the global REGISTRY, without mutating it.
+        self.extra_tools: dict = extra_tools or {}
         self.messages: List[dict] = [{"role": "system", "content": system_prompt}]
         self.steps = 0
         self._prefix_printed = False
@@ -118,8 +123,9 @@ class Agent:
                 print(f"\033[1massistant>\033[0m {content}")
         else:
             want_tokens = self.stream and (self.verbose or self.event_cb is not None)
+            tools = TOOLS + [s.schema() for s in self.extra_tools.values()] if self.extra_tools else TOOLS
             content, raw = llm.chat(
-                self.messages, self.model, TOOLS, base_url=self.base_url,
+                self.messages, self.model, tools, base_url=self.base_url,
                 num_ctx=self.num_ctx, temperature=self.temperature, stream=self.stream,
                 on_token=self._token_handler if want_tokens else None,
             )
@@ -129,7 +135,8 @@ class Agent:
 
         calls = llm.normalize(raw)
         if not calls and content:
-            recovered, cleaned = llm.extract_inline_tool_calls(content, VALID_NAMES)
+            valid = VALID_NAMES | set(self.extra_tools) if self.extra_tools else VALID_NAMES
+            recovered, cleaned = llm.extract_inline_tool_calls(content, valid)
             if recovered:
                 calls = recovered
                 content = cleaned
@@ -194,9 +201,10 @@ class Agent:
                 preview = preview[:300] + "...}"
             print(f"\033[36m▶ {name}\033[0m({preview})")
 
-        spec = resolve_spec(name)
+        spec = resolve_spec(name) or self.extra_tools.get(name)
         if spec is None:
-            return f"Error: unknown tool '{name}'. Available tools: {', '.join(ADVERTISED)}"
+            available = ', '.join(ADVERTISED + list(self.extra_tools))
+            return f"Error: unknown tool '{name}'. Available tools: {available}"
 
         allowed, block = self._gate(spec, name, args)
         if not allowed:

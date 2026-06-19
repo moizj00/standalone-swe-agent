@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import pytest
 import requests
@@ -40,7 +41,17 @@ def _start(cfg: ServerConfig):
     httpd = build_server(cfg)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, f"http://127.0.0.1:{port}"
+    base = f"http://127.0.0.1:{port}"
+    # Wait until the server actually accepts a connection before yielding, so a
+    # test's first request can't race the thread's startup (any HTTP status —
+    # incl. 401 for the token fixture — means it's up).
+    for _ in range(100):
+        try:
+            requests.get(base + "/api/health", timeout=0.5)
+            break
+        except requests.exceptions.RequestException:
+            time.sleep(0.02)
+    return httpd, base
 
 
 @pytest.fixture
@@ -132,6 +143,13 @@ def test_tools_endpoint(srv):
     assert any(t["name"] == "write_file" for t in tools)
 
 
+def test_tools_endpoint_reserved_includes_aliases(srv):
+    reserved = requests.get(srv + "/api/tools", timeout=10).json()["reserved"]
+    # reserved must carry aliases (not just canonical names) so the builder's
+    # shadow check matches the server and a custom `bash` tool can't be saved.
+    assert "read_file" in reserved and "bash" in reserved
+
+
 def test_chat_blocking(srv):
     r = requests.post(srv + "/api/chat", json=_user("hello"), timeout=10)
     assert r.status_code == 200
@@ -169,6 +187,40 @@ def test_session_id_is_stable_and_reused(srv):
     r2 = requests.post(srv + "/api/chat", json=payload, timeout=10)
     assert r2.json()["session_id"] == sid
     assert "echo: two" in r2.json()["text"]
+
+
+def test_custom_tools_invalid_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "9bad", "description": ""}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+    assert "custom_tools" in r.json()["error"]
+
+
+def test_custom_tools_internal_url_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "x", "description": "d",
+                                 "http": {"method": "GET", "url": "http://127.0.0.1/secret"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+
+
+def test_custom_tools_shadow_builtin_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "read_file", "description": "d",
+                                 "http": {"method": "GET", "url": "https://api.example.com/x"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+    assert "shadow" in r.json()["error"]
+
+
+def test_custom_tools_valid_accepted(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "get_x", "description": "d",
+                                 "http": {"method": "GET", "url": "https://api.example.com/x"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 200
+    assert "echo: hi" in r.json()["text"]
 
 
 def test_invalid_session_id_rejected(srv):

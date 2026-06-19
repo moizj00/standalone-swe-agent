@@ -52,8 +52,9 @@ from .agent import Agent
 from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
                      DEFAULT_TEMPERATURE, MAX_STEPS, SESSION_DIR)
 from .session import Session, build_env_context, load_project_instructions
-from .tools import ADVERTISED, TOOLS
+from .tools import ADVERTISED, TOOLS, VALID_NAMES
 from .tools.base import ToolContext
+from .tools.custom import build_toolspecs
 from .tools.exec import BackgroundRegistry
 
 MAX_BODY = 16 * 1024 * 1024          # reject request bodies larger than this (413)
@@ -397,7 +398,10 @@ class Handler(BaseHTTPRequestHandler):
                 "cwd": str(Path(self.config.cwd).resolve()),
             })
         if path == "/api/tools":
-            return self._send_json({"tools": gemini_tool_declarations()})
+            # `reserved` is the full set of names (incl. aliases like bash/cat/list_dir)
+            # the builder must refuse so a custom tool can't shadow one and 400 the chat.
+            return self._send_json({"tools": gemini_tool_declarations(),
+                                    "reserved": sorted(VALID_NAMES)})
         return self._send_json({"error": f"not found: {path}"}, 404)
 
     def do_POST(self):
@@ -426,6 +430,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._send_json({"error": f"bad messages: {e}"}, 400)
 
+        # Validate custom tools before touching session state. Omitted key = no
+        # change; an explicit (possibly empty) list = replace this session's set.
+        raw_custom = data.get("custom_tools")
+        custom_specs = {}
+        if raw_custom is not None:
+            try:
+                custom_specs, cerrors = build_toolspecs(raw_custom)
+            except Exception as e:
+                # backstop: a validator bug on hostile input must degrade to a clean
+                # 400, never an uncaught exception that drops the connection.
+                print(f"[server] custom_tools validation error: {e}", file=sys.stderr)
+                return self._send_json({"error": "invalid custom_tools"}, 400)
+            if cerrors:
+                return self._send_json(
+                    {"error": "invalid custom_tools: " + "; ".join(cerrors[:5])}, 400)
+
         sid, entry, created = self.registry.get_or_create(session_id)
 
         lock: threading.Lock = entry["lock"]
@@ -438,6 +458,8 @@ class Handler(BaseHTTPRequestHandler):
             # sticky for the session (and recorded in persisted meta) by design.
             if data.get("model"):
                 entry["agent"].model = data["model"]
+            if raw_custom is not None:
+                entry["agent"].extra_tools = custom_specs
             try:
                 _prime_agent(entry, messages, created)
             except ValueError as e:

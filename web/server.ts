@@ -31,7 +31,9 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  // Match the agent server's 16MB cap: a turn can ship many custom-tool schemas,
+  // and the default ~100kb limit would 413 them before they reach Python.
+  app.use(express.json({ limit: '16mb' }));
 
   // -- Tools ----------------------------------------------------------------
   // GET proxies the REAL tool registry from the Python agent (read-only).
@@ -39,8 +41,9 @@ async function startServer() {
     try {
       const upstream = await fetch(`${AGENT_SERVER_URL}/api/tools`, { headers: agentHeaders() });
       const data = await upstream.json();
-      // The Python server returns { tools: [...] }; the dashboard expects a bare array.
-      res.status(upstream.status).json(Array.isArray(data) ? data : (data.tools ?? data));
+      // Pass the { tools, reserved } object through verbatim; both dashboard
+      // consumers tolerate object-or-array, and `reserved` carries alias names.
+      res.status(upstream.status).json(data);
     } catch (error: any) {
       res.status(502).json({ error: `Agent server unreachable at ${AGENT_SERVER_URL}: ${error.message}` });
     }
