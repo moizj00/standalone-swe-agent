@@ -11,7 +11,7 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 - **Full tool suite** (~23 tools): file system ops (list, read, write, edit, delete, move, glob, info), advanced search (grep with context), rich execution (run_command/bash with background, timeout, description), todo management, git/patch helpers (apply_patch, git_status, git_diff, etc.), dedicated test runner, web research (search, open_page), and powerful sub-agent spawning (20+ simultaneous).
 - **Sub-agent isolation**: Each subagent has its own private message history and tool state. Main agent only sees spawn confirmation + clean summary result.
 - **One-line launcher**: `ollama-agent "your task here"`
-- **Ollama-native**: Uses Ollama's OpenAI-compatible API. Default model qwen2.5-coder:7b.
+- **Ollama-native**: Uses Ollama's OpenAI-compatible API. Default model `qwen2.5:7b` (override with `OLLAMA_AGENT_MODEL`, e.g. `qwen2.5-coder:7b` once pulled).
 - **Autonomous**: The LLM decides tool use, spawns subs for parallel work, manages todos, verifies changes.
 
 ## Quick Start
@@ -21,8 +21,10 @@ It supports parallel sub-agents with **isolated private context** — subagents 
    ollama serve
    ```
 
-2. Pull the recommended model:
+2. Pull a tool-capable model (the agent defaults to `qwen2.5:7b`):
    ```bash
+   ollama pull qwen2.5:7b
+   # Optional: the coding-specialized variant (then set OLLAMA_AGENT_MODEL=qwen2.5-coder:7b)
    ollama pull qwen2.5-coder:7b
    ```
 

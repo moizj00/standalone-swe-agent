@@ -14,8 +14,8 @@
 #   ollama-agent --model qwen2.5:7b "refactor the database layer"
 #   ollama-agent                 # interactive mode
 #
-# Defaults to the best coding model (qwen2.5-coder:7b) and ensures the server is running.
-# Set OLLAMA_AGENT_MODEL env var to override the default model.
+# Defaults to qwen2.5:7b (the model installed locally) and ensures the server is running.
+# Set OLLAMA_AGENT_MODEL env var to override the default model (e.g. qwen2.5-coder:7b if pulled).
 
 set -euo pipefail
 
@@ -25,8 +25,8 @@ AGENT_DIR="$(dirname "$SCRIPT_PATH")"
 PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
 ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
 
-# Prefer the coding-specialized model
-DEFAULT_MODEL="qwen2.5-coder:7b"
+# Default to the locally-installed model (override via OLLAMA_AGENT_MODEL)
+DEFAULT_MODEL="qwen2.5:7b"
 MODEL="${OLLAMA_AGENT_MODEL:-$DEFAULT_MODEL}"
 
 # Ensure the Ollama server is up (idempotent)
