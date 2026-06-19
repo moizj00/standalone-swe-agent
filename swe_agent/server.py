@@ -432,7 +432,13 @@ class Handler(BaseHTTPRequestHandler):
         raw_custom = data.get("custom_tools")
         custom_specs = {}
         if raw_custom is not None:
-            custom_specs, cerrors = build_toolspecs(raw_custom)
+            try:
+                custom_specs, cerrors = build_toolspecs(raw_custom)
+            except Exception as e:
+                # backstop: a validator bug on hostile input must degrade to a clean
+                # 400, never an uncaught exception that drops the connection.
+                print(f"[server] custom_tools validation error: {e}", file=sys.stderr)
+                return self._send_json({"error": "invalid custom_tools"}, 400)
             if cerrors:
                 return self._send_json(
                     {"error": "invalid custom_tools: " + "; ".join(cerrors[:5])}, 400)

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from typing import Optional
+import threading
+from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -17,6 +18,34 @@ import requests
 DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; swe-agent/2.0; +local)"}
 DEFAULT_TIMEOUT = 20
 MAX_REDIRECTS = 5
+
+# --- DNS pinning (anti-rebinding) -------------------------------------------
+# The SSRF check resolves the host, but `requests`/urllib3 would resolve it AGAIN
+# at connect time — a TOCTOU window a DNS-rebinding host can exploit (public IP to
+# the check, internal IP to the connect). We close it by pinning: resolve+validate
+# once, then make the connect use the SAME validated IPs. A single global
+# getaddrinfo wrapper consults a THREAD-LOCAL pin map (the server is multi-threaded,
+# so a global patch must be thread-safe) and only overrides resolution for the host
+# we pinned on this thread; everything else delegates to the real resolver. SNI and
+# certificate validation still use the original hostname.
+_real_getaddrinfo = socket.getaddrinfo
+_pin = threading.local()
+
+
+def _pinning_getaddrinfo(host, port, *args, **kwargs):
+    pins = getattr(_pin, "map", None)
+    if pins and host in pins:
+        out = []
+        for ip in pins[host]:
+            fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            sockaddr = (ip, port, 0, 0) if fam == socket.AF_INET6 else (ip, port)
+            out.append((fam, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr))
+        if out:
+            return out
+    return _real_getaddrinfo(host, port, *args, **kwargs)
+
+
+socket.getaddrinfo = _pinning_getaddrinfo  # installed once; inert unless _pin.map is set
 
 
 def ip_is_blocked(ip: str) -> bool:
@@ -56,6 +85,36 @@ def ssrf_check(url: str) -> Optional[str]:
     return None
 
 
+def _resolve_validated(url: str) -> Tuple[str, List[str]]:
+    """Resolve ``url``'s host and return (host, [validated_ips]) for connection
+    pinning, or raise ValueError(reason) if it is unsafe to fetch. Unlike
+    ssrf_check (which returns a reason for config-time validation), this is the
+    request-time gate and never silently passes a bad host."""
+    try:
+        parsed = urlparse(url)
+        scheme, host, port = parsed.scheme, parsed.hostname, parsed.port
+    except ValueError:
+        raise ValueError("refused: malformed URL")
+    if scheme not in ("http", "https"):
+        raise ValueError(f"refused: scheme '{scheme}' not allowed (http/https only)")
+    if not host:
+        raise ValueError("refused: no host in URL")
+    try:
+        infos = _real_getaddrinfo(host, port or (443 if scheme == "https" else 80))
+    except socket.gaierror:
+        raise ValueError(f"refused: cannot resolve host {host}")
+    ips: List[str] = []
+    for info in infos:
+        ip = info[4][0]
+        if ip_is_blocked(ip):
+            raise ValueError(f"refused: {host} resolves to internal address {ip} (SSRF guard)")
+        if ip not in ips:
+            ips.append(ip)
+    if not ips:
+        raise ValueError(f"refused: no addresses for host {host}")
+    return host, ips
+
+
 def _origin(url: str):
     """(scheme, host, port) for redirect same-origin checks; None if unparseable.
 
@@ -83,31 +142,32 @@ def safe_request(method: str, url: str, *, headers: Optional[dict] = None,
     base_origin = _origin(url)
     current = url
     body = json
-    for _ in range(max_redirects + 1):
-        reason = ssrf_check(current)
-        if reason:
-            raise ValueError(reason)
-        # Only send caller-supplied headers (which may carry bearer tokens / API
-        # keys) AND the request body (which may carry credentials/PII) on a
-        # same-origin hop. A redirect to another host gets the default UA and no
-        # body, so a 3xx can't exfiltrate the custom tool's secrets.
-        same_origin = base_origin is not None and _origin(current) == base_origin
-        req_headers = {**DEFAULT_HEADERS, **(caller_headers if same_origin else {})}
-        # Headers, query params, and body all ride only on same-origin hops; a
-        # cross-origin redirect gets none of them (no secret/PII exfiltration).
-        r = requests.request(method.upper(), current, headers=req_headers,
-                             params=(params if same_origin else None),
-                             json=(body if same_origin else None),
-                             timeout=timeout, allow_redirects=False)
-        if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
-            current = urljoin(current, r.headers["Location"])
-            # 301/302/303 convert a non-GET to GET (POST-redirect-GET), matching
-            # normal client semantics; 307/308 preserve method + body.
-            if r.status_code in (301, 302, 303):
-                method, body = "GET", None
-            continue
-        return r
-    raise ValueError("too many redirects")
+    try:
+        for _ in range(max_redirects + 1):
+            # Resolve+validate, then pin the connect to the SAME IPs (no second,
+            # independent DNS lookup the rebinding window could exploit).
+            host, ips = _resolve_validated(current)
+            _pin.map = {host: ips}
+            # Only send caller-supplied headers (which may carry bearer tokens /
+            # API keys), query params, and body on a same-origin hop. A redirect to
+            # another origin gets the default UA and none of them — no exfiltration.
+            same_origin = base_origin is not None and _origin(current) == base_origin
+            req_headers = {**DEFAULT_HEADERS, **(caller_headers if same_origin else {})}
+            r = requests.request(method.upper(), current, headers=req_headers,
+                                 params=(params if same_origin else None),
+                                 json=(body if same_origin else None),
+                                 timeout=timeout, allow_redirects=False)
+            if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                current = urljoin(current, r.headers["Location"])
+                # 301/302/303 convert a non-GET to GET (POST-redirect-GET), matching
+                # normal client semantics; 307/308 preserve method + body.
+                if r.status_code in (301, 302, 303):
+                    method, body = "GET", None
+                continue
+            return r
+        raise ValueError("too many redirects")
+    finally:
+        _pin.map = {}
 
 
 def safe_get(url: str):

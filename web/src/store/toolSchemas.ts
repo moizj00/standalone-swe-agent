@@ -175,6 +175,7 @@ export function validateDraft(
   draft: DraftSchema,
   schemas: CustomToolSchema[],
   editingId: string | null,
+  builtinNames: Set<string> = new Set(),
 ): string[] {
   const errors: string[] = [];
   const name = draft.name.trim();
@@ -185,6 +186,9 @@ export function validateDraft(
     errors.push('Tool name must start with a letter/underscore and contain only letters, digits, and underscores.');
   } else if (schemas.some(s => s.name === name && s.id !== editingId)) {
     errors.push(`A tool named "${name}" already exists.`);
+  } else if (builtinNames.has(name)) {
+    // mirror the server: a custom tool can't shadow a built-in agent tool
+    errors.push(`A tool named "${name}" shadows a built-in agent tool; choose another.`);
   }
 
   if (!draft.description.trim()) {
@@ -215,9 +219,17 @@ export function validateDraft(
       errors.push('Endpoint URL must start with http:// or https://.');
     }
     const declared = new Set(draft.parameters.map(p => p.name.trim()).filter(Boolean));
-    for (const ph of urlPlaceholders(url)) {
+    const placeholders = new Set(urlPlaceholders(url));
+    for (const ph of placeholders) {
       if (!declared.has(ph)) errors.push(`URL placeholder "{${ph}}" has no matching parameter.`);
     }
+    // mirror the server's path-direction rule: a 'path' param needs a placeholder
+    draft.parameters.forEach(p => {
+      const pn = p.name.trim();
+      if (pn && p.location === 'path' && !placeholders.has(pn)) {
+        errors.push(`Parameter "${pn}" is set to 'path' but the URL has no "{${pn}}" placeholder.`);
+      }
+    });
     draft.http.headers.forEach(h => {
       if (h.value.trim() && !h.key.trim()) errors.push('A header has a value but no name.');
     });

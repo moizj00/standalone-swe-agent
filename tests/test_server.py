@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import pytest
 import requests
@@ -40,7 +41,17 @@ def _start(cfg: ServerConfig):
     httpd = build_server(cfg)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, f"http://127.0.0.1:{port}"
+    base = f"http://127.0.0.1:{port}"
+    # Wait until the server actually accepts a connection before yielding, so a
+    # test's first request can't race the thread's startup (any HTTP status —
+    # incl. 401 for the token fixture — means it's up).
+    for _ in range(100):
+        try:
+            requests.get(base + "/api/health", timeout=0.5)
+            break
+        except requests.exceptions.RequestException:
+            time.sleep(0.02)
+    return httpd, base
 
 
 @pytest.fixture

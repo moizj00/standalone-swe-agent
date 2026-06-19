@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   Cpu, Database, Network, Send, Terminal, Settings, Copy, 
   RotateCcw, Plus, Trash2, Check, AlertCircle, RefreshCw, 
-  BookOpen, ExternalLink, Code, FileCode
+  BookOpen, Code, FileCode
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import Markdown from 'react-markdown';
@@ -72,9 +72,11 @@ export const CodingMode = () => {
       const response = await fetch('/api/tools');
       if (response.ok) {
         const data = await response.json();
-        setToolsList(data);
-        if (data.length > 0) {
-          setSelectedTool(data[0]);
+        // The agent server returns { tools: [...] }; tolerate a bare array too.
+        const list = Array.isArray(data) ? data : (data?.tools ?? []);
+        setToolsList(list);
+        if (list.length > 0) {
+          setSelectedTool(list[0]);
         }
       }
     } catch (err) {
@@ -215,7 +217,7 @@ export const CodingMode = () => {
       }
     } catch (error: any) {
       console.error(error);
-      liveText = `[SYSTEM ERROR]: ${error.message || 'Failed to connect to agent.'}`;
+      finalText = `[SYSTEM ERROR]: ${error.message || 'Failed to connect to agent.'}`;
       render();
     } finally {
       setLoading(false);

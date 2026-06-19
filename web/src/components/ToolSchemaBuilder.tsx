@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Wrench, Plus, Trash2, Copy, Check, Save, X, AlertCircle, Files, FileJson,
 } from 'lucide-react';
@@ -24,10 +24,23 @@ export const ToolSchemaBuilder = () => {
   const [draft, setDraft] = useState<DraftSchema | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  // built-in agent tool names (read-only) — reject custom names that shadow them,
+  // matching the server so a draft can't pass here yet 400 the chat turn.
+  const [builtinNames, setBuiltinNames] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    fetch('/api/tools')
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        const list = Array.isArray(data) ? data : (data?.tools ?? []);
+        setBuiltinNames(new Set(list.map((t: any) => t?.name).filter(Boolean)));
+      })
+      .catch(() => {});
+  }, []);
 
   const errors = useMemo(
-    () => (draft ? validateDraft(draft, schemas, editingId) : []),
-    [draft, schemas, editingId],
+    () => (draft ? validateDraft(draft, schemas, editingId, builtinNames) : []),
+    [draft, schemas, editingId, builtinNames],
   );
 
   const preview = useMemo(

@@ -191,7 +191,7 @@ def test_optional_path_placeholder_unresolved_errors(monkeypatch, tmp_path):
 
 def test_safe_request_same_origin_302_keeps_params_converts_to_get(monkeypatch):
     from swe_agent.tools import _net
-    monkeypatch.setattr(_net, "ssrf_check", lambda url: None)
+    monkeypatch.setattr(_net, "_resolve_validated", lambda url: ("h", ["93.184.216.34"]))  # avoid DNS
     seen = []
 
     def fake_request(method, url, headers=None, params=None, json=None, **kw):
@@ -205,6 +205,81 @@ def test_safe_request_same_origin_302_keeps_params_converts_to_get(monkeypatch):
     assert seen[0]["params"] == {"q": "x"} and seen[0]["json"] == {"b": 1} and seen[0]["method"] == "POST"
     # same-origin hop: query preserved, 302 converts POST->GET and drops body
     assert seen[1]["params"] == {"q": "x"} and seen[1]["method"] == "GET" and seen[1]["json"] is None
+
+
+def test_dns_pin_overrides_resolution():
+    from swe_agent.tools import _net
+    _net._pin.map = {"example.com": ["93.184.216.34"]}
+    try:
+        res = _net._pinning_getaddrinfo("example.com", 443)
+        assert [r[4][0] for r in res] == ["93.184.216.34"]
+        loc = _net._pinning_getaddrinfo("localhost", 80)  # unpinned -> real resolver (offline-safe)
+        assert any(r[4][0] in ("127.0.0.1", "::1") for r in loc)
+    finally:
+        _net._pin.map = {}
+
+
+def test_resolve_validated_blocks_internal_and_scheme():
+    from swe_agent.tools import _net
+    with pytest.raises(ValueError):
+        _net._resolve_validated("http://127.0.0.1/x")
+    with pytest.raises(ValueError):
+        _net._resolve_validated("ftp://example.com/")
+
+
+def test_validate_unhashable_location_no_crash():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "http": {"method": "GET", "url": "https://api.x", "param_location": {"p": ["query"]}}})
+    assert any("bad location" in e for e in errs)
+
+
+def test_build_toolspecs_unhashable_location_no_crash():
+    specs, errs = custom.build_toolspecs(
+        [{"name": "x", "description": "d", "http": {"method": "GET", "url": "https://api.x", "param_location": {"p": {"a": 1}}}}])
+    assert errs and "x" not in specs  # reported, not a TypeError
+
+
+def test_redact_before_truncate_no_fragment_leak(monkeypatch, tmp_path):
+    secret = "SUPERSECRETTOKEN"  # 16 chars, straddles the truncation boundary
+    body = "P" * (custom.MAX_RESPONSE_CHARS - 8) + secret + "Q" * 40
+    monkeypatch.setattr(custom, "safe_request", lambda *a, **k: _fake_resp(200, body))
+    spec = custom.build_toolspec({"name": "f", "description": "d",
+                                  "http": {"method": "GET", "url": "https://api.x", "auth": {"type": "bearer", "token": secret}}})
+    out = spec.impl(_ctx(tmp_path))
+    # the straddling secret is fully gone — no full value and no surviving prefix
+    # fragment (redaction happens before truncation, so the cut can't sever it).
+    assert secret not in out and "SUPER" not in out
+
+
+def test_url_query_credential_redacted(monkeypatch, tmp_path):
+    monkeypatch.setattr(custom, "safe_request", lambda *a, **k: _fake_resp(200, "you sent api_key=KEY1234567"))
+    spec = custom.build_toolspec({"name": "f", "description": "d",
+                                  "http": {"method": "GET", "url": "https://api.x?api_key=KEY1234567"}})
+    out = spec.impl(_ctx(tmp_path))
+    assert "KEY1234567" not in out and "REDACTED" in out
+
+
+def test_short_auth_token_redacted(monkeypatch, tmp_path):
+    monkeypatch.setattr(custom, "safe_request", lambda *a, **k: _fake_resp(200, "tok=abc done"))
+    spec = custom.build_toolspec({"name": "f", "description": "d",
+                                  "http": {"method": "GET", "url": "https://api.x", "auth": {"type": "bearer", "token": "abc"}}})
+    out = spec.impl(_ctx(tmp_path))
+    assert "abc" not in out  # auth token redacted even below the 4-char header floor
+
+
+def test_validate_header_param_collides_with_auth():
+    errs = custom.validate_def({"name": "x", "description": "d", "parameters": _params("Authorization"),
+                                "http": {"method": "GET", "url": "https://api.x",
+                                         "auth": {"type": "bearer", "token": "T"},
+                                         "param_location": {"Authorization": "header"}}})
+    assert any("collides" in e for e in errs)
+
+
+def test_validate_required_must_be_declared():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "parameters": {"type": "object", "properties": {}, "required": ["id"]},
+                                "http": {"method": "GET", "url": "https://api.x"}})
+    assert any("not declared" in e for e in errs)
 
 
 def test_validate_non_dict_headers():
@@ -271,7 +346,7 @@ def test_response_redacts_configured_secrets(monkeypatch, tmp_path):
 
 def test_safe_request_strips_auth_and_body_on_cross_origin_redirect(monkeypatch):
     from swe_agent.tools import _net
-    monkeypatch.setattr(_net, "ssrf_check", lambda url: None)  # avoid DNS in the test
+    monkeypatch.setattr(_net, "_resolve_validated", lambda url: ("h", ["93.184.216.34"]))  # avoid DNS
     seen = []
 
     def fake_request(method, url, headers=None, **kw):

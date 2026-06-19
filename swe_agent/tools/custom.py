@@ -29,10 +29,14 @@ from __future__ import annotations
 
 import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from ._net import safe_request, ssrf_check
 from .base import REGISTRY, ToolContext, ToolSpec
+
+# query-string keys that look like credentials worth redacting from echoed responses
+_CRED_QS_KEYS = {"api_key", "apikey", "key", "token", "access_token", "secret",
+                 "sig", "signature", "password", "pwd"}
 
 NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -101,6 +105,11 @@ def validate_def(defn: dict) -> List[str]:
     elif isinstance(params, dict) and params.get("properties") is not None \
             and not isinstance(params.get("properties"), dict):
         errors.append(f"tool {name!r}: parameters.properties must be an object")
+    # every required name must be a declared property, else the model supplies it,
+    # the required-gate passes, but _render drops it -> a broadened request.
+    for r in _param_required(defn):
+        if r not in _param_props(defn):
+            errors.append(f"tool {name!r}: required param {r!r} is not declared in parameters.properties")
 
     http = defn.get("http")
     if http is not None:
@@ -135,15 +144,29 @@ def validate_def(defn: dict) -> List[str]:
             headers = http.get("headers")
             if headers is not None and not isinstance(headers, dict):
                 errors.append(f"tool {name!r}: http.headers must be an object")
+            # header names a header-located param must not clobber (configured + auth)
+            reserved = {str(k).lower() for k in headers} if isinstance(headers, dict) else set()
+            auth = http.get("auth")
+            if isinstance(auth, dict):
+                atype = str(auth.get("type", "")).lower()
+                if atype == "bearer":
+                    reserved.add("authorization")
+                elif atype == "header" and auth.get("key"):
+                    reserved.add(str(auth["key"]).lower())
             loc = http.get("param_location") or {}
             if isinstance(loc, dict):
                 for pname, where in loc.items():
-                    if where not in VALID_LOCATIONS:
-                        errors.append(f"tool {name!r}: param '{pname}' has bad location '{where}'")
-                    elif where == "path" and isinstance(url, str) and ("{" + str(pname) + "}") not in url:
+                    # `where` is client-supplied; an unhashable value (list/dict) would
+                    # raise on the set test, so type-check before membership.
+                    if not isinstance(where, str) or where not in VALID_LOCATIONS:
+                        errors.append(f"tool {name!r}: param '{pname}' has bad location {where!r}")
+                        continue
+                    if where == "path" and isinstance(url, str) and ("{" + str(pname) + "}") not in url:
                         # a path param with no matching placeholder would be silently
                         # dropped (e.g. delete_user(id) -> DELETE /users), so reject it.
                         errors.append(f"tool {name!r}: path param '{pname}' has no '{{{pname}}}' placeholder in the URL")
+                    if where == "header" and str(pname).lower() in reserved:
+                        errors.append(f"tool {name!r}: param '{pname}' (header) collides with a configured/auth header")
     return errors
 
 
@@ -212,13 +235,22 @@ def _collect_secrets(http: dict) -> List[str]:
     if isinstance(auth, dict):
         for k in ("token", "value"):
             v = auth.get(k)
-            if isinstance(v, str) and len(v) >= 4:
+            if isinstance(v, str) and v:  # unambiguous credential: no length floor
                 secrets.append(v)
     hdrs = http.get("headers")
     if isinstance(hdrs, dict):
         for v in hdrs.values():
             if isinstance(v, str) and len(v) >= 4:
                 secrets.append(v)
+    # credentials embedded directly in the URL query string (e.g. ?api_key=...)
+    url = http.get("url")
+    if isinstance(url, str):
+        try:
+            for k, v in parse_qsl(urlsplit(url).query, keep_blank_values=False):
+                if k.lower() in _CRED_QS_KEYS and isinstance(v, str) and len(v) >= 4:
+                    secrets.append(v)
+        except Exception:
+            pass
     return secrets
 
 
@@ -264,10 +296,13 @@ def build_toolspec(defn: dict) -> ToolSpec:
             return f"Error calling '{name}': {e}"
         except Exception:              # transport error — do NOT echo headers/secrets
             return f"Error calling '{name}': request failed"
-        text = r.text or ""
+        # Redact BEFORE truncating, so the length cap can never sever a secret and
+        # leave an un-redacted fragment (an endpoint that echoes our headers/auth
+        # must not leak them, in whole or in part).
+        text = _redact(r.text or "", secrets)
         if len(text) > MAX_RESPONSE_CHARS:
-            text = text[:MAX_RESPONSE_CHARS] + f"\n... (truncated; {len(r.text) - MAX_RESPONSE_CHARS} more chars)"
-        text = _redact(text, secrets)  # an endpoint that echoes our headers/auth must not leak them
+            extra = len(text) - MAX_RESPONSE_CHARS
+            text = text[:MAX_RESPONSE_CHARS] + f"\n... (truncated; {extra} more chars)"
         return f"[{name}] HTTP {r.status_code}\n{text}".strip()
 
     return ToolSpec(
