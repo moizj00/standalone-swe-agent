@@ -27,11 +27,12 @@ def run_tests(ctx: ToolContext, cwd: Optional[str] = None, command: Optional[str
 
 register(ToolSpec(
     name="run_tests",
-    description="Auto-detect the project's test framework (pytest, npm, cargo, go) and run the tests. "
-                "Pass an explicit command to override detection.",
+    description="Auto-detect the project's test framework (pytest, npm, cargo, go) and run the suite; use after making "
+                "changes to confirm nothing broke. Pass an explicit command to override detection. SAFETY: runs a real "
+                "test command, which may execute project code.",
     parameters={"type": "object", "properties": {
-        "cwd": {"type": "string"},
-        "command": {"type": "string", "description": "Optional explicit test command"},
+        "cwd": {"type": "string", "description": "Directory to run tests in (default: agent cwd)"},
+        "command": {"type": "string", "description": "Explicit test command to run instead of auto-detection, e.g. 'pytest tests/'"},
     }, "required": []},
     impl=run_tests, mutating=True, category="exec",
 ))

@@ -27,12 +27,13 @@ def task_complete(ctx: ToolContext, final_summary: str,
 
 register(ToolSpec(
     name="task_complete",
-    description="Signal that the task is fully complete and verified. Provide final_summary, confidence "
-                "(low/medium/high), and files_changed. Calling this ENDS the run -- do not call other tools after it.",
+    description="Signal that the task is FULLY complete and verified. Call this once, only after all work is done and "
+                "checked -- it immediately ENDS the run, so any remaining edits, commands, or checks must happen BEFORE "
+                "this call, never after. Provide final_summary, and optionally confidence (low/medium/high) and files_changed.",
     parameters={"type": "object", "properties": {
-        "final_summary": {"type": "string", "description": "What you did and how to verify it"},
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "files_changed": {"type": "array", "items": {"type": "string"}},
+        "final_summary": {"type": "string", "description": "What you did and how the user can verify it, e.g. 'Added null check in parse(); run npm test'."},
+        "confidence": {"type": "string", "description": "Your confidence the task is correct and complete: low, medium, or high.", "enum": ["low", "medium", "high"]},
+        "files_changed": {"type": "array", "description": "Paths of files you created or modified, e.g. ['src/app.py'].", "items": {"type": "string"}},
     }, "required": ["final_summary"]},
     impl=task_complete, category="meta",
 ))

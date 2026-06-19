@@ -242,55 +242,55 @@ def create_directory(ctx: ToolContext, path: str) -> str:
 
 register(ToolSpec(
     name="read_file",
-    description="Read a file's contents with line numbers. Supports start_line/end_line for large files. Use this before editing.",
+    description="Read a file's contents with line numbers. Always read a file before editing it, so you can copy an exact old_string. Pass start_line/end_line to read a slice of a large file.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string"},
-        "start_line": {"type": "integer", "description": "1-based first line (optional)"},
-        "end_line": {"type": "integer", "description": "1-based last line (optional)"},
+        "path": {"type": "string", "description": "File path relative to the project root, e.g. 'app/page.tsx'."},
+        "start_line": {"type": "integer", "description": "1-based first line to read (optional)"},
+        "end_line": {"type": "integer", "description": "1-based last line to read (optional)"},
     }, "required": ["path"]},
     impl=read_file, category="read", aliases=("view_file", "cat"),
 ))
 
 register(ToolSpec(
     name="read_multiple_files",
-    description="Read several files at once. More efficient than multiple read_file calls for exploration.",
+    description="Read several files at once. Use when exploring; more efficient than many separate read_file calls. Output is truncated, so prefer read_file when you need a file's exact contents to edit it.",
     parameters={"type": "object", "properties": {
-        "paths": {"type": "array", "items": {"type": "string"}},
+        "paths": {"type": "array", "items": {"type": "string"}, "description": "List of file paths relative to the project root."},
     }, "required": ["paths"]},
     impl=read_multiple_files, category="read",
 ))
 
 register(ToolSpec(
     name="write_file",
-    description="Create or completely overwrite a file. Prefer edit/multi_edit/apply_patch for changes to existing files.",
+    description="Create a new file or completely overwrite an existing one. Destructive: replaces the entire file and cannot be undone. Use only for new files; prefer edit/multi_edit/apply_patch to change existing files.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string"},
-        "content": {"type": "string"},
+        "path": {"type": "string", "description": "File path relative to the project root, e.g. 'app/api/users/route.ts'. Missing parent dirs are created."},
+        "content": {"type": "string", "description": "Full contents to write to the file."},
     }, "required": ["path", "content"]},
     impl=write_file, mutating=True, category="write",
 ))
 
 register(ToolSpec(
     name="edit",
-    description="Precise find-and-replace in a file. old_string must be unique unless replace_all=true.",
+    description="Precise find-and-replace in an existing file; modifies the file in place. Read the file first so old_string matches exactly. old_string must be unique in the file unless replace_all=true.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string"},
-        "old_string": {"type": "string"},
-        "new_string": {"type": "string"},
-        "replace_all": {"type": "boolean", "default": False},
+        "path": {"type": "string", "description": "File path relative to the project root, e.g. 'app/page.tsx'."},
+        "old_string": {"type": "string", "description": "Exact text to find, including indentation and whitespace; copy it verbatim from the file."},
+        "new_string": {"type": "string", "description": "Replacement text. Must differ from old_string."},
+        "replace_all": {"type": "boolean", "default": False, "description": "Replace every occurrence instead of requiring old_string to be unique."},
     }, "required": ["path", "old_string", "new_string"]},
-    impl=edit, mutating=True, category="write", aliases=("search_replace",),
+    impl=edit, mutating=True, category="write", aliases=("search_replace", "edit_file"),
 ))
 
 register(ToolSpec(
     name="multi_edit",
-    description="Apply multiple find-and-replace edits to ONE file atomically (all succeed or none are written).",
+    description="Apply several find-and-replace edits to ONE file atomically (all succeed or none are written); modifies the file in place. Use for multiple changes to the same file. Read the file first so each old_string matches exactly. Edits apply in order, so later old_strings must match the text left by earlier ones.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string"},
-        "edits": {"type": "array", "items": {"type": "object", "properties": {
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-            "replace_all": {"type": "boolean", "default": False},
+        "path": {"type": "string", "description": "File path relative to the project root, e.g. 'app/page.tsx'."},
+        "edits": {"type": "array", "description": "Edits to apply in order, e.g. [{\"old_string\": \"foo\", \"new_string\": \"bar\"}].", "items": {"type": "object", "properties": {
+            "old_string": {"type": "string", "description": "Exact text to find, including whitespace."},
+            "new_string": {"type": "string", "description": "Replacement text."},
+            "replace_all": {"type": "boolean", "default": False, "description": "Replace every occurrence of old_string."},
         }, "required": ["old_string", "new_string"]}},
     }, "required": ["path", "edits"]},
     impl=multi_edit, mutating=True, category="write",
@@ -298,51 +298,51 @@ register(ToolSpec(
 
 register(ToolSpec(
     name="ls",
-    description="List a directory. Ignores noise dirs (.git, node_modules, venv, ...). Set recursive=true to walk the tree.",
+    description="List the entries in a directory. Use to see what a folder contains; ignores noise dirs (.git, node_modules, venv, ...). Set recursive=true to walk the whole tree, or use glob to match by name pattern.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string", "description": "Directory (default '.')"},
-        "recursive": {"type": "boolean", "default": False},
+        "path": {"type": "string", "description": "Directory to list, relative to the project root (default '.')."},
+        "recursive": {"type": "boolean", "default": False, "description": "Walk the directory tree instead of listing one level."},
     }, "required": []},
     impl=ls, category="read", aliases=("list_dir",),
 ))
 
 register(ToolSpec(
     name="glob",
-    description="Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Ignores noise dirs.",
+    description="Find files by name pattern. Use to locate files when you know part of the name or extension; ignores noise dirs. To search file contents instead, use grep.",
     parameters={"type": "object", "properties": {
-        "pattern": {"type": "string"},
-        "path": {"type": "string", "description": "Base directory (default '.')"},
+        "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py' or 'src/**/*.ts'."},
+        "path": {"type": "string", "description": "Base directory to search from, relative to the project root (default '.')."},
     }, "required": ["pattern"]},
     impl=glob_files, category="read",
 ))
 
 register(ToolSpec(
     name="get_file_info",
-    description="Get metadata about a file or directory (size, type, modified time).",
-    parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    description="Get metadata about a file or directory (size, type, modified time) without reading its contents. Use to check whether a path exists or whether it is a file or directory.",
+    parameters={"type": "object", "properties": {"path": {"type": "string", "description": "File or directory path relative to the project root."}}, "required": ["path"]},
     impl=get_file_info, category="read",
 ))
 
 register(ToolSpec(
     name="delete_file",
-    description="Delete a file or an empty directory.",
-    parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    description="Delete a file or an empty directory. Irreversible: the file is removed and cannot be recovered. Non-empty directories are not deleted; clear their contents first.",
+    parameters={"type": "object", "properties": {"path": {"type": "string", "description": "File or empty-directory path relative to the project root."}}, "required": ["path"]},
     impl=delete_file, mutating=True, category="write",
 ))
 
 register(ToolSpec(
     name="move_file",
-    description="Move or rename a file or directory.",
+    description="Move or rename a file or directory. Overwrites the destination if it already exists, so confirm the destination path first.",
     parameters={"type": "object", "properties": {
-        "source": {"type": "string"},
-        "destination": {"type": "string"},
+        "source": {"type": "string", "description": "Existing path to move, relative to the project root."},
+        "destination": {"type": "string", "description": "New path, relative to the project root; missing parent dirs are created."},
     }, "required": ["source", "destination"]},
     impl=move_file, mutating=True, category="write",
 ))
 
 register(ToolSpec(
     name="create_directory",
-    description="Create a directory, including any missing parents. No error if it already exists.",
-    parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    description="Create a directory, including any missing parents; writes to the filesystem. No error if it already exists. Not needed before write_file, which creates parent dirs on its own.",
+    parameters={"type": "object", "properties": {"path": {"type": "string", "description": "Directory path to create, relative to the project root."}}, "required": ["path"]},
     impl=create_directory, mutating=True, category="write",
 ))

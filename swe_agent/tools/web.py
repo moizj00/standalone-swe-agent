@@ -146,18 +146,21 @@ def web_search(ctx: ToolContext, query: str, max_results: int = 5) -> str:
 
 register(ToolSpec(
     name="web_fetch",
-    description="Fetch a URL and return its content as readable text (HTML is converted to plain text).",
-    parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    description="Fetch one URL and return its page content as readable text (HTML is stripped to plain "
+                "text; long pages are truncated). Use when you already have a URL; use web_search first if "
+                "you only have a topic.",
+    parameters={"type": "object", "properties": {"url": {"type": "string", "description": "Full URL including scheme, e.g. 'https://docs.python.org/3/library/asyncio.html'"}}, "required": ["url"]},
     impl=web_fetch, category="read",
 ))
 
 register(ToolSpec(
     name="web_search",
-    description="Search the web and return top result titles + URLs. Uses a real provider if configured, "
-                "else a best-effort scrape.",
+    description="Search the web and return top result titles + URLs (uses a configured provider, else a "
+                "best-effort scrape). Use to discover relevant pages for a topic, then web_fetch a URL from "
+                "the results to read it.",
     parameters={"type": "object", "properties": {
-        "query": {"type": "string"},
-        "max_results": {"type": "integer", "default": 5},
+        "query": {"type": "string", "description": "Search query, e.g. 'python asyncio gather exception handling'"},
+        "max_results": {"type": "integer", "default": 5, "description": "Number of results to return, 1-10 (default 5)"},
     }, "required": ["query"]},
     impl=web_search, category="read",
 ))

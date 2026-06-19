@@ -212,28 +212,32 @@ def kill_bash(ctx: ToolContext, bash_id: str) -> str:
 
 register(ToolSpec(
     name="run_command",
-    description="Execute a shell command (build, test, git, etc.). Set background=true for long-running "
-                "processes, then poll with bash_output and stop with kill_bash. Optional cwd, timeout (s), description.",
+    description="Run a real shell command and return its stdout/stderr and exit code; use for builds, tests, git, "
+                "package managers, and other CLI work. SAFETY: this executes actual shell commands, so be careful "
+                "with destructive ones (deletes, force pushes). Set background=true for long-running processes, then "
+                "poll with bash_output and stop with kill_bash.",
     parameters={"type": "object", "properties": {
-        "command": {"type": "string"},
-        "cwd": {"type": "string", "description": "Working directory (default: agent cwd)"},
+        "command": {"type": "string", "description": "Shell command to run, e.g. 'npm run build' or 'git status'"},
+        "cwd": {"type": "string", "description": "Working directory to run in (default: agent cwd)"},
         "description": {"type": "string", "description": "Short description of what the command does"},
-        "timeout": {"type": "integer", "description": "Timeout in seconds"},
-        "background": {"type": "boolean", "default": False},
+        "timeout": {"type": "integer", "description": "Timeout in seconds before the command is killed"},
+        "background": {"type": "boolean", "default": False, "description": "Run detached for long-running processes; returns a bash_id to poll"},
     }, "required": ["command"]},
-    impl=run_command, mutating=True, category="exec", aliases=("bash", "shell"),
+    impl=run_command, mutating=True, category="exec", aliases=("bash", "shell", "run_terminal_cmd"),
 ))
 
 register(ToolSpec(
     name="bash_output",
-    description="Get new output from a background command started with run_command(background=true).",
-    parameters={"type": "object", "properties": {"bash_id": {"type": "string"}}, "required": ["bash_id"]},
+    description="Fetch any new stdout/stderr from a background command started with run_command(background=true). "
+                "Poll this to check progress or completion of a long-running process.",
+    parameters={"type": "object", "properties": {"bash_id": {"type": "string", "description": "The bash_id returned when the background command was started"}}, "required": ["bash_id"]},
     impl=bash_output, category="read",
 ))
 
 register(ToolSpec(
     name="kill_bash",
-    description="Terminate a background command started with run_command(background=true).",
-    parameters={"type": "object", "properties": {"bash_id": {"type": "string"}}, "required": ["bash_id"]},
+    description="Terminate a still-running background command started with run_command(background=true). "
+                "SAFETY: this force-kills the process and any children; use when a process is stuck or no longer needed.",
+    parameters={"type": "object", "properties": {"bash_id": {"type": "string", "description": "The bash_id of the background process to kill"}}, "required": ["bash_id"]},
     impl=kill_bash, mutating=True, category="exec",
 ))

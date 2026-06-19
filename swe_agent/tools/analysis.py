@@ -105,19 +105,21 @@ def get_directory_tree(ctx: ToolContext, path: str = ".", max_depth: int = 3) ->
 register(ToolSpec(
     name="get_project_overview",
     description="High-level summary of a project: detected manifests/languages, file counts by extension, "
-                "top-level entries, and the start of any README. Use first on an unfamiliar codebase.",
+                "top-level entries, and the start of any README. Read-only. Use this first to orient on an "
+                "unfamiliar codebase, before get_directory_tree or reading individual files.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string", "description": "Project root (default '.')"},
+        "path": {"type": "string", "description": "Project root directory to summarize, e.g. '.' or 'backend' (default '.')."},
     }, "required": []},
     impl=get_project_overview, category="read",
 ))
 
 register(ToolSpec(
     name="get_directory_tree",
-    description="ASCII tree of the project structure (skips noise dirs), bounded by max_depth.",
+    description="ASCII tree of the project structure (skips noise dirs like .git/node_modules), bounded by max_depth. "
+                "Read-only. Use to see how files and folders are laid out once get_project_overview has oriented you.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string", "description": "Base directory (default '.')"},
-        "max_depth": {"type": "integer", "description": "Max depth to descend (default 3)"},
+        "path": {"type": "string", "description": "Base directory to map, e.g. '.' or 'src' (default '.')."},
+        "max_depth": {"type": "integer", "description": "How many levels deep to descend; lower it to reduce output on large trees (default 3)."},
     }, "required": []},
     impl=get_directory_tree, category="read",
 ))
