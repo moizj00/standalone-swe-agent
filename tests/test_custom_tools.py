@@ -132,6 +132,19 @@ def test_validate_rejects_host_placeholder():
     assert any("host" in e for e in errs)
 
 
+def test_validate_rejects_uppercase_scheme_host_placeholder():
+    # case-sensitive regex used to let HTTPS://{host} bypass the authority check
+    errs = custom.validate_def({"name": "x", "description": "d", "parameters": _params("host"),
+                                "http": {"method": "GET", "url": "HTTPS://{host}/v1"}})
+    assert any("host" in e for e in errs)
+
+
+def test_validate_non_object_param_location():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "http": {"method": "GET", "url": "https://api.x", "param_location": "oops"}})
+    assert any("param_location must be an object" in e for e in errs)
+
+
 def test_origin_normalizes_default_port():
     from swe_agent.tools import _net
     assert _net._origin("https://h/x") == _net._origin("https://h:443/y")

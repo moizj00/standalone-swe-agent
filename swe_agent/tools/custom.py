@@ -130,10 +130,10 @@ def validate_def(defn: dict) -> List[str]:
                 if reason:
                     errors.append(f"tool {name!r}: {reason}")
                 # Placeholders are only safe in the path/query. A {host}/{port} in the
-                # scheme/authority would let a model-supplied arg redirect the tool's
-                # auth headers to an arbitrary origin.
-                authority = re.match(r"^https?://[^/?#]*", url)
-                if authority and "{" in authority.group(0):
+                # authority would let a model-supplied arg redirect the tool's auth
+                # headers to an arbitrary origin. Use urlsplit (case-insensitive on the
+                # scheme) so a mixed-case scheme like HTTPS:// can't slip past.
+                if "{" in urlsplit(url).netloc:
                     errors.append(f"tool {name!r}: URL placeholders are only allowed in the path/query, not the host")
                 # Every {placeholder} must map to a declared parameter, or _render
                 # filters the (undeclared) arg out and the literal {x} URL is called.
@@ -153,7 +153,9 @@ def validate_def(defn: dict) -> List[str]:
                     reserved.add("authorization")
                 elif atype == "header" and auth.get("key"):
                     reserved.add(str(auth["key"]).lower())
-            loc = http.get("param_location") or {}
+            loc = http.get("param_location")
+            if loc is not None and not isinstance(loc, dict):
+                errors.append(f"tool {name!r}: http.param_location must be an object")
             if isinstance(loc, dict):
                 for pname, where in loc.items():
                     # `where` is client-supplied; an unhashable value (list/dict) would
@@ -192,7 +194,8 @@ def _render(defn: dict, args: dict) -> Tuple[str, dict, dict, Optional[dict]]:
     http = defn.get("http") or {}
     method = str(http.get("method", "GET")).upper()
     url = str(http.get("url", ""))
-    locations = http.get("param_location") or {}
+    locations = http.get("param_location")
+    locations = locations if isinstance(locations, dict) else {}
     default_loc = "query" if method in ("GET", "DELETE") else "body"
 
     raw_headers = http.get("headers")
