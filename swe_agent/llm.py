@@ -109,8 +109,20 @@ def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], st
             found.append({"id": f"inline_{uuid.uuid4().hex[:8]}", "name": name,
                           "arguments": args if isinstance(args, dict) else {}})
 
+    # A fenced ```json {...}``` object is matched BOTH by the fence regex above and by
+    # the bare-object scan, so the same call would otherwise be returned (and dispatched)
+    # twice. Dedupe by (name, arguments) -- duplicate identical calls are never intended
+    # and re-running a non-idempotent tool (commit, shell, delete) twice is harmful.
+    deduped, seen = [], set()
+    for c in found:
+        key = (c["name"], json.dumps(c["arguments"], sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+
     cleaned = re.sub(r"```(?:json|tool_call|tool)?\s*\{.*?\}\s*```", "", content, flags=re.S).strip()
-    return found, cleaned
+    return deduped, cleaned
 
 
 # --------------------------------------------------------------------------- transport
