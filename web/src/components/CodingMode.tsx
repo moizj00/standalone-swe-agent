@@ -7,6 +7,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import Markdown from 'react-markdown';
 import { cn } from '../utils';
+import { useToolSchemas } from '../store/ToolSchemasProvider';
+import { callableSchemas } from '../store/toolSchemas';
 
 type Role = 'user' | 'model';
 
@@ -43,6 +45,7 @@ export const CodingMode = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const { schemas: customSchemas } = useToolSchemas();
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
 
   // Tool Schema States
@@ -180,7 +183,11 @@ export const CodingMode = () => {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: newMessages, session_id: sessionId ?? undefined }),
+        body: JSON.stringify({
+          messages: newMessages,
+          session_id: sessionId ?? undefined,
+          custom_tools: callableSchemas(customSchemas),
+        }),
       });
 
       if (!response.ok || !response.body) {

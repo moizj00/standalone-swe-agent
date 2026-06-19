@@ -54,6 +54,7 @@ from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAM
 from .session import Session, build_env_context, load_project_instructions
 from .tools import ADVERTISED, TOOLS
 from .tools.base import ToolContext
+from .tools.custom import build_toolspecs
 from .tools.exec import BackgroundRegistry
 
 MAX_BODY = 16 * 1024 * 1024          # reject request bodies larger than this (413)
@@ -426,6 +427,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._send_json({"error": f"bad messages: {e}"}, 400)
 
+        # Validate custom tools before touching session state. Omitted key = no
+        # change; an explicit (possibly empty) list = replace this session's set.
+        raw_custom = data.get("custom_tools")
+        custom_specs = {}
+        if raw_custom is not None:
+            custom_specs, cerrors = build_toolspecs(raw_custom)
+            if cerrors:
+                return self._send_json(
+                    {"error": "invalid custom_tools: " + "; ".join(cerrors[:5])}, 400)
+
         sid, entry, created = self.registry.get_or_create(session_id)
 
         lock: threading.Lock = entry["lock"]
@@ -438,6 +449,8 @@ class Handler(BaseHTTPRequestHandler):
             # sticky for the session (and recorded in persisted meta) by design.
             if data.get("model"):
                 entry["agent"].model = data["model"]
+            if raw_custom is not None:
+                entry["agent"].extra_tools = custom_specs
             try:
                 _prime_agent(entry, messages, created)
             except ValueError as e:

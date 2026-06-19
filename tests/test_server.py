@@ -171,6 +171,31 @@ def test_session_id_is_stable_and_reused(srv):
     assert "echo: two" in r2.json()["text"]
 
 
+def test_custom_tools_invalid_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "9bad", "description": ""}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+    assert "custom_tools" in r.json()["error"]
+
+
+def test_custom_tools_internal_url_rejected(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "x", "description": "d",
+                                 "http": {"method": "GET", "url": "http://127.0.0.1/secret"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 400
+
+
+def test_custom_tools_valid_accepted(srv):
+    payload = {"messages": [{"role": "user", "parts": [{"text": "hi"}]}],
+               "custom_tools": [{"name": "get_x", "description": "d",
+                                 "http": {"method": "GET", "url": "https://api.example.com/x"}}]}
+    r = requests.post(srv + "/api/chat", json=payload, timeout=10)
+    assert r.status_code == 200
+    assert "echo: hi" in r.json()["text"]
+
+
 def test_invalid_session_id_rejected(srv):
     payload = {"session_id": "../etc/passwd", "messages": [{"role": "user", "parts": [{"text": "x"}]}]}
     r = requests.post(srv + "/api/chat", json=payload, timeout=10)

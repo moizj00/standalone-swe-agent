@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, BarChart3, Moon, Sun, Code2, ListTodo, Shield, Search } from 'lucide-react';
+import { LayoutDashboard, BarChart3, Moon, Sun, Code2, ListTodo, Shield, Search, Wrench } from 'lucide-react';
 import { cn } from './utils';
 import { Overview } from './components/Overview';
 import { Analytics } from './components/Analytics';
 import { CodingMode } from './components/CodingMode';
+import { ToolSchemaBuilder } from './components/ToolSchemaBuilder';
 import { mockUsers } from './data/mock';
 
 function App() {
-  const [view, setView] = useState<'overview' | 'analytics' | 'coding'>('overview');
+  const [view, setView] = useState<'overview' | 'analytics' | 'tools' | 'coding'>('overview');
   const [mode, setMode] = useState<'planning' | 'coding'>('planning');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [currentUser] = useState(mockUsers[0]);
@@ -30,6 +31,7 @@ function App() {
     switch (view) {
       case 'overview': return <Overview user={currentUser} searchQuery={searchQuery} />;
       case 'analytics': return <Analytics />;
+      case 'tools': return <ToolSchemaBuilder />;
       case 'coding': return <CodingMode />;
       default: return <Overview user={currentUser} searchQuery={searchQuery} />;
     }
@@ -62,6 +64,9 @@ function App() {
                </button>
                <button onClick={() => setView('analytics')} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors", view === 'analytics' ? 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-50' : 'text-slate-600 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-800/50')}>
                  <BarChart3 className="h-4 w-4" /> Analytics
+               </button>
+               <button onClick={() => setView('tools')} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors", view === 'tools' ? 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-50' : 'text-slate-600 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-800/50')}>
+                 <Wrench className="h-4 w-4" /> Tool Builder
                </button>
              </>
            )}
