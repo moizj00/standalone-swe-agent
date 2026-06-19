@@ -84,8 +84,12 @@ def test_build_toolspecs_duplicate_and_cap():
 
 # ---- request mapping ------------------------------------------------------
 
+def _params(*names):
+    return {"type": "object", "properties": {n: {"type": "string"} for n in names}}
+
+
 def test_render_path_query_body_header():
-    defn = {"name": "f", "description": "d", "http": {
+    defn = {"name": "f", "description": "d", "parameters": _params("id", "q", "b", "h"), "http": {
         "method": "POST", "url": "https://api.x/{id}/do",
         "param_location": {"id": "path", "q": "query", "b": "body", "h": "header"}}}
     url, query, headers, body = custom._render(defn, {"id": "42", "q": "hi", "b": 1, "h": "H"})
@@ -94,10 +98,38 @@ def test_render_path_query_body_header():
 
 
 def test_render_default_location_by_method():
-    _, q, _, b = custom._render({"name": "f", "description": "d", "http": {"method": "GET", "url": "https://api.x"}}, {"a": 1})
+    _, q, _, b = custom._render({"name": "f", "description": "d", "parameters": _params("a"), "http": {"method": "GET", "url": "https://api.x"}}, {"a": 1})
     assert q == {"a": 1} and b is None
-    _, q, _, b = custom._render({"name": "f", "description": "d", "http": {"method": "POST", "url": "https://api.x"}}, {"a": 1})
+    _, q, _, b = custom._render({"name": "f", "description": "d", "parameters": _params("a"), "http": {"method": "POST", "url": "https://api.x"}}, {"a": 1})
     assert q == {} and b == {"a": 1}
+
+
+def test_render_filters_undeclared_args():
+    defn = {"name": "f", "description": "d",
+            "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "http": {"method": "GET", "url": "https://api.x"}}
+    _, query, _, body = custom._render(defn, {"q": "ok", "admin": "true", "delete_all": True})
+    assert query == {"q": "ok"} and body is None  # undeclared args dropped
+
+
+def test_validate_path_param_without_placeholder():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+                                "http": {"method": "DELETE", "url": "https://api.x/users",
+                                         "param_location": {"id": "path"}}})
+    assert any("placeholder" in e for e in errs)
+
+
+def test_validate_non_dict_headers():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "http": {"method": "GET", "url": "https://api.x", "headers": ["bad"]}})
+    assert any("headers must be an object" in e for e in errs)
+
+
+def test_build_toolspecs_non_dict_headers_no_crash():
+    specs, errs = custom.build_toolspecs(
+        [{"name": "x", "description": "d", "http": {"method": "GET", "url": "https://api.x", "headers": "oops"}}])
+    assert errs and "x" not in specs  # reported as a validation error, not an AttributeError
 
 
 def test_render_bearer_auth():
@@ -116,7 +148,7 @@ def test_executor_calls_safe_request(monkeypatch, tmp_path):
         return _fake_resp(200, "BODY")
 
     monkeypatch.setattr(custom, "safe_request", fake)
-    spec = custom.build_toolspec({"name": "f", "description": "d", "http": {
+    spec = custom.build_toolspec({"name": "f", "description": "d", "parameters": _params("id", "q"), "http": {
         "method": "GET", "url": "https://api.x/{id}", "param_location": {"id": "path"}}})
     out = spec.impl(_ctx(tmp_path), id="7", q="z")
     assert "HTTP 200" in out and "BODY" in out
@@ -150,23 +182,26 @@ def test_response_redacts_configured_secrets(monkeypatch, tmp_path):
     assert "SUPERSECRET" not in out and "APIKEY123" not in out and "REDACTED" in out
 
 
-def test_safe_request_strips_auth_on_cross_origin_redirect(monkeypatch):
+def test_safe_request_strips_auth_and_body_on_cross_origin_redirect(monkeypatch):
     from swe_agent.tools import _net
     monkeypatch.setattr(_net, "ssrf_check", lambda url: None)  # avoid DNS in the test
     seen = []
 
     def fake_request(method, url, headers=None, **kw):
-        seen.append((url, headers or {}))
+        seen.append((url, headers or {}, kw.get("json")))
         if len(seen) == 1:
-            return _fake_resp(302, "", location="https://other.example/next")
+            return _fake_resp(302, "", location="https://other.example/next")  # cross-origin
         return _fake_resp(200, "ok")
 
     monkeypatch.setattr(_net.requests, "request", fake_request)
-    _net.safe_request("GET", "https://api.example/start",
-                      headers={"Authorization": "Bearer T", "X-Api-Key": "K"})
-    assert seen[0][1].get("Authorization") == "Bearer T"          # same-origin hop keeps auth
-    assert "Authorization" not in seen[1][1] and "X-Api-Key" not in seen[1][1]  # cross-origin stripped
-    assert "User-Agent" in seen[1][1]                             # default UA still sent
+    _net.safe_request("POST", "https://api.example/start",
+                      headers={"Authorization": "Bearer T", "X-Api-Key": "K"},
+                      json={"secret": "x"})
+    # same-origin first hop keeps auth + body
+    assert seen[0][1].get("Authorization") == "Bearer T" and seen[0][2] == {"secret": "x"}
+    # cross-origin second hop: headers stripped, body dropped, default UA kept
+    assert "Authorization" not in seen[1][1] and "X-Api-Key" not in seen[1][1]
+    assert seen[1][2] is None and "User-Agent" in seen[1][1]
 
 
 def test_executor_hides_transport_secrets(monkeypatch, tmp_path):

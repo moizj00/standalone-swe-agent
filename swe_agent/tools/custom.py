@@ -99,11 +99,18 @@ def validate_def(defn: dict) -> List[str]:
                     reason = "malformed URL"
                 if reason:
                     errors.append(f"tool {name!r}: {reason}")
+            headers = http.get("headers")
+            if headers is not None and not isinstance(headers, dict):
+                errors.append(f"tool {name!r}: http.headers must be an object")
             loc = http.get("param_location") or {}
             if isinstance(loc, dict):
                 for pname, where in loc.items():
                     if where not in VALID_LOCATIONS:
                         errors.append(f"tool {name!r}: param '{pname}' has bad location '{where}'")
+                    elif where == "path" and isinstance(url, str) and ("{" + str(pname) + "}") not in url:
+                        # a path param with no matching placeholder would be silently
+                        # dropped (e.g. delete_user(id) -> DELETE /users), so reject it.
+                        errors.append(f"tool {name!r}: path param '{pname}' has no '{{{pname}}}' placeholder in the URL")
     return errors
 
 
@@ -132,10 +139,17 @@ def _render(defn: dict, args: dict) -> Tuple[str, dict, dict, Optional[dict]]:
     locations = http.get("param_location") or {}
     default_loc = "query" if method in ("GET", "DELETE") else "body"
 
-    headers: Dict[str, str] = {str(k): str(v) for k, v in (http.get("headers") or {}).items()}
+    raw_headers = http.get("headers")
+    headers: Dict[str, str] = ({str(k): str(v) for k, v in raw_headers.items()}
+                               if isinstance(raw_headers, dict) else {})
     headers.update(_auth_headers(http.get("auth")))
     query: Dict[str, object] = {}
     body: Dict[str, object] = {}
+
+    # Only forward arguments the operator actually declared — a hallucinated field
+    # (e.g. admin=true / delete_all=true) must never become a real request param.
+    declared = set((defn.get("parameters") or {}).get("properties") or {})
+    args = {k: v for k, v in args.items() if k in declared}
 
     # path params first (substitute {name}); the rest go to query/body/header
     path_params = {n for n, w in locations.items() if w == "path"}
@@ -167,9 +181,11 @@ def _collect_secrets(http: dict) -> List[str]:
             v = auth.get(k)
             if isinstance(v, str) and len(v) >= 4:
                 secrets.append(v)
-    for v in (http.get("headers") or {}).values():
-        if isinstance(v, str) and len(v) >= 4:
-            secrets.append(v)
+    hdrs = http.get("headers")
+    if isinstance(hdrs, dict):
+        for v in hdrs.values():
+            if isinstance(v, str) and len(v) >= 4:
+                secrets.append(v)
     return secrets
 
 

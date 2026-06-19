@@ -7,8 +7,8 @@ import { cn } from '../utils';
 import { useToolSchemas } from '../store/ToolSchemasProvider';
 import {
   DraftSchema, HTTP_METHODS, HttpMethod, PARAM_LOCATIONS, PARAM_TYPES, ParamLocation,
-  ParamType, ToolParameter, emptyDraft, emptyHttp, emptyParameter, exportDeclarations,
-  makeId, toFunctionDeclaration, validateDraft,
+  ParamType, ToolParameter, defaultParamLocation, emptyDraft, emptyHttp, emptyParameter,
+  exportDeclarations, makeId, toFunctionDeclaration, validateDraft,
 } from '../store/toolSchemas';
 
 /**
@@ -283,7 +283,7 @@ export const ToolSchemaBuilder = () => {
                         </select>
                         {draft.http && (
                           <select
-                            value={p.location ?? 'query'}
+                            value={p.location ?? defaultParamLocation(draft.http?.method)}
                             onChange={e => updateParam(p.id, { location: e.target.value as ParamLocation })}
                             title="Where this argument goes in the HTTP request"
                             className="w-full text-xs rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 outline-none focus:border-indigo-500"

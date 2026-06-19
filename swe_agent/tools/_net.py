@@ -81,12 +81,14 @@ def safe_request(method: str, url: str, *, headers: Optional[dict] = None,
         if reason:
             raise ValueError(reason)
         # Only send caller-supplied headers (which may carry bearer tokens / API
-        # keys) on a same-origin hop. A redirect to another host gets the default
-        # UA only, so a 3xx can't exfiltrate the custom tool's secrets.
+        # keys) AND the request body (which may carry credentials/PII) on a
+        # same-origin hop. A redirect to another host gets the default UA and no
+        # body, so a 3xx can't exfiltrate the custom tool's secrets.
         same_origin = base_origin is not None and _origin(current) == base_origin
         req_headers = {**DEFAULT_HEADERS, **(caller_headers if same_origin else {})}
         r = requests.request(method.upper(), current, headers=req_headers, params=params,
-                             json=body, timeout=timeout, allow_redirects=False)
+                             json=(body if same_origin else None), timeout=timeout,
+                             allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
             current = urljoin(current, r.headers["Location"])
             params = None  # query already encoded into the original; don't re-append

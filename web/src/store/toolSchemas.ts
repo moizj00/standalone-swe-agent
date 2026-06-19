@@ -144,7 +144,15 @@ export function emptyDraft(): DraftSchema {
 }
 
 export function emptyParameter(): ToolParameter {
-  return { id: makeId(), name: '', type: 'STRING', description: '', required: false, location: 'query' };
+  // location intentionally left unset: an unset location is omitted from the
+  // payload so the backend applies its method default (body for POST/PUT/PATCH,
+  // query for GET/DELETE). The editor shows that default in the dropdown.
+  return { id: makeId(), name: '', type: 'STRING', description: '', required: false };
+}
+
+/** The HTTP location the backend will default a parameter to for `method`. */
+export function defaultParamLocation(method?: HttpMethod): ParamLocation {
+  return method === 'POST' || method === 'PUT' || method === 'PATCH' ? 'body' : 'query';
 }
 
 export function emptyHttp(): HttpConfig {
