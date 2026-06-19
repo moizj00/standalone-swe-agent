@@ -52,7 +52,7 @@ from .agent import Agent
 from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
                      DEFAULT_TEMPERATURE, MAX_STEPS, SESSION_DIR)
 from .session import Session, build_env_context, load_project_instructions
-from .tools import ADVERTISED, TOOLS
+from .tools import ADVERTISED, TOOLS, VALID_NAMES
 from .tools.base import ToolContext
 from .tools.custom import build_toolspecs
 from .tools.exec import BackgroundRegistry
@@ -398,7 +398,10 @@ class Handler(BaseHTTPRequestHandler):
                 "cwd": str(Path(self.config.cwd).resolve()),
             })
         if path == "/api/tools":
-            return self._send_json({"tools": gemini_tool_declarations()})
+            # `reserved` is the full set of names (incl. aliases like bash/cat/list_dir)
+            # the builder must refuse so a custom tool can't shadow one and 400 the chat.
+            return self._send_json({"tools": gemini_tool_declarations(),
+                                    "reserved": sorted(VALID_NAMES)})
         return self._send_json({"error": f"not found: {path}"}, 404)
 
     def do_POST(self):

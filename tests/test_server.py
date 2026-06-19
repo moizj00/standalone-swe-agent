@@ -143,6 +143,13 @@ def test_tools_endpoint(srv):
     assert any(t["name"] == "write_file" for t in tools)
 
 
+def test_tools_endpoint_reserved_includes_aliases(srv):
+    reserved = requests.get(srv + "/api/tools", timeout=10).json()["reserved"]
+    # reserved must carry aliases (not just canonical names) so the builder's
+    # shadow check matches the server and a custom `bash` tool can't be saved.
+    assert "read_file" in reserved and "bash" in reserved
+
+
 def test_chat_blocking(srv):
     r = requests.post(srv + "/api/chat", json=_user("hello"), timeout=10)
     assert r.status_code == 200

@@ -31,7 +31,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlsplit
 
-from ._net import safe_request, ssrf_check
+from ._net import read_text_capped, safe_request, ssrf_check
 from .base import REGISTRY, ToolContext, ToolSpec
 
 # query-string keys that look like credentials worth redacting from echoed responses
@@ -133,8 +133,17 @@ def validate_def(defn: dict) -> List[str]:
                 # authority would let a model-supplied arg redirect the tool's auth
                 # headers to an arbitrary origin. Use urlsplit (case-insensitive on the
                 # scheme) so a mixed-case scheme like HTTPS:// can't slip past.
-                if "{" in urlsplit(url).netloc:
+                split = urlsplit(url)
+                if "{" in split.netloc:
                     errors.append(f"tool {name!r}: URL placeholders are only allowed in the path/query, not the host")
+                # userinfo (user:pass@host) becomes a basic-auth header requests would
+                # send and could echo back unredacted; require the auth field instead.
+                try:
+                    has_userinfo = bool(split.username or split.password)
+                except ValueError:
+                    has_userinfo = "@" in split.netloc
+                if has_userinfo:
+                    errors.append(f"tool {name!r}: URL must not embed credentials (user:pass@host); use the auth field")
                 # Every {placeholder} must map to a declared parameter, or _render
                 # filters the (undeclared) arg out and the literal {x} URL is called.
                 declared = set(_param_props(defn))
@@ -301,8 +310,9 @@ def build_toolspec(defn: dict) -> ToolSpec:
             return f"Error calling '{name}': request failed"
         # Redact BEFORE truncating, so the length cap can never sever a secret and
         # leave an un-redacted fragment (an endpoint that echoes our headers/auth
-        # must not leak them, in whole or in part).
-        text = _redact(r.text or "", secrets)
+        # must not leak them, in whole or in part). read_text_capped bounds the
+        # download so a huge body can't exhaust memory.
+        text = _redact(read_text_capped(r), secrets)
         if len(text) > MAX_RESPONSE_CHARS:
             extra = len(text) - MAX_RESPONSE_CHARS
             text = text[:MAX_RESPONSE_CHARS] + f"\n... (truncated; {extra} more chars)"

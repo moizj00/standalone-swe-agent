@@ -18,6 +18,39 @@ import requests
 DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; swe-agent/2.0; +local)"}
 DEFAULT_TIMEOUT = 20
 MAX_REDIRECTS = 5
+MAX_DOWNLOAD_BYTES = 2_000_000  # stop reading a response body past this (memory DoS guard)
+
+# trust_env=False ignores HTTP(S)_PROXY/NO_PROXY/.netrc: a proxy would do its OWN
+# DNS resolution and connect, bypassing our address pin (and re-opening the SSRF
+# rebinding hole). All guarded fetches go direct.
+_SESSION = requests.Session()
+_SESSION.trust_env = False
+
+
+def read_text_capped(r, max_bytes: int = MAX_DOWNLOAD_BYTES) -> str:
+    """Read at most ``max_bytes`` of a (streamed) response body so a huge/malicious
+    body can't exhaust memory before truncation. Falls back to ``.text`` for
+    non-streaming test doubles."""
+    if not hasattr(r, "iter_content"):
+        return getattr(r, "text", "") or ""
+    chunks, total = [], 0
+    try:
+        for chunk in r.iter_content(8192):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= max_bytes:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+    enc = getattr(r, "encoding", None) or "utf-8"
+    return b"".join(chunks).decode(enc, errors="replace")
 
 # --- DNS pinning (anti-rebinding) -------------------------------------------
 # The SSRF check resolves the host, but `requests`/urllib3 would resolve it AGAIN
@@ -157,11 +190,14 @@ def safe_request(method: str, url: str, *, headers: Optional[dict] = None,
             # another origin gets the default UA and none of them — no exfiltration.
             same_origin = base_origin is not None and _origin(current) == base_origin
             req_headers = {**DEFAULT_HEADERS, **(caller_headers if same_origin else {})}
-            r = requests.request(method.upper(), current, headers=req_headers,
+            # stream=True so the body isn't buffered until the caller reads it via
+            # read_text_capped; _SESSION (trust_env=False) keeps proxies out of the loop.
+            r = _SESSION.request(method.upper(), current, headers=req_headers,
                                  params=(params if same_origin else None),
                                  json=(body if same_origin else None),
-                                 timeout=timeout, allow_redirects=False)
+                                 timeout=timeout, allow_redirects=False, stream=True)
             if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                r.close()  # drop the unread redirect body before the next hop
                 current = urljoin(current, r.headers["Location"])
                 # 301/302/303 convert a non-GET to GET (POST-redirect-GET), matching
                 # normal client semantics; 307/308 preserve method + body.

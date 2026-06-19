@@ -166,6 +166,34 @@ export function urlPlaceholders(url: string): string[] {
   return [...url.matchAll(PLACEHOLDER_RE)].map(m => m[1]);
 }
 
+/** Best-effort check for a LITERAL private/loopback/link-local host the server's
+ * SSRF guard would reject (the browser can't resolve DNS, so this catches only
+ * literal hosts — enough to stop the obvious http://127.0.0.1 / metadata cases
+ * that would otherwise 400 every chat). */
+export function isBlockedLiteralHost(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return false;  // unparseable (e.g. has placeholders) — other rules cover it
+  }
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '0.0.0.0' || host === '::1' || host === '::') return true;
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const [a, b] = m.slice(1).map(Number);
+    if ([a, ...m.slice(1).map(Number)].some(x => x > 255)) return false;
+    if (a === 0 || a === 127 || a === 10) return true;          // this-host / loopback / private
+    if (a === 192 && b === 168) return true;                    // private
+    if (a === 169 && b === 254) return true;                    // link-local / cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;           // private
+    if (a === 100 && b >= 64 && b <= 127) return true;          // CGNAT / shared
+  }
+  if (/^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;  // IPv6 ULA / link-local
+  return false;
+}
+
 /**
  * Validate a draft against the existing set. `editingId` excludes the schema
  * currently being edited from the uniqueness check. Returns human-readable
@@ -218,6 +246,10 @@ export function validateDraft(
       errors.push('Endpoint URL is required when an endpoint is configured.');
     } else if (!/^https?:\/\//i.test(url)) {
       errors.push('Endpoint URL must start with http:// or https://.');
+    } else if (isBlockedLiteralHost(url)) {
+      errors.push('Endpoint host is a private/loopback/link-local address the agent will refuse.');
+    } else if (/\/\/[^/?#]*@/.test(url)) {
+      errors.push('Endpoint URL must not embed credentials (user:pass@host); use the auth field.');
     }
     // mirror the server: placeholders are not allowed in the scheme/authority
     const authority = url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/);
@@ -369,6 +401,25 @@ export function makeId(): string {
 
 export const STORAGE_KEY = 'swe-agent.tool-schemas.v1';
 
+/** Coerce one persisted entry into a well-formed schema, or null if unsalvageable.
+ * Later code assumes `http.url`/`http.headers` exist, so a partial/corrupt `http`
+ * block is dropped (the tool degrades to declarations-only) rather than crashing
+ * the Tool Builder / Coding Mode. */
+function _normalizeLoaded(s: any): CustomToolSchema | null {
+  if (!s || typeof s.id !== 'string' || typeof s.name !== 'string' || !Array.isArray(s.parameters)) {
+    return null;
+  }
+  let http = s.http;
+  if (http !== undefined) {
+    if (!http || typeof http !== 'object' || typeof http.url !== 'string') {
+      http = undefined;  // unusable endpoint -> declarations-only
+    } else {
+      http = { ...http, headers: Array.isArray(http.headers) ? http.headers : [] };
+    }
+  }
+  return { ...s, http };
+}
+
 export function loadSchemas(): CustomToolSchema[] {
   if (typeof localStorage === 'undefined') return [];
   try {
@@ -376,10 +427,7 @@ export function loadSchemas(): CustomToolSchema[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // shallow sanity filter so a corrupted blob can't crash the app
-    return parsed.filter(
-      (s: any) => s && typeof s.id === 'string' && typeof s.name === 'string'
-        && Array.isArray(s.parameters));
+    return parsed.map(_normalizeLoaded).filter((s): s is CustomToolSchema => s !== null);
   } catch {
     return [];
   }

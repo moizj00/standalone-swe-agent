@@ -16,7 +16,8 @@ from swe_agent.tools.exec import BackgroundRegistry
 
 def _fake_resp(status=200, text="ok", location=None):
     class R:
-        pass
+        def close(self):
+            pass
     r = R()
     r.status_code = status
     r.text = text
@@ -139,6 +140,41 @@ def test_validate_rejects_uppercase_scheme_host_placeholder():
     assert any("host" in e for e in errs)
 
 
+def test_validate_rejects_url_userinfo():
+    errs = custom.validate_def({"name": "x", "description": "d",
+                                "http": {"method": "GET", "url": "https://user:pass@api.example/v"}})
+    assert any("credentials" in e for e in errs)
+
+
+def test_session_ignores_env_proxies():
+    from swe_agent.tools import _net
+    assert _net._SESSION.trust_env is False  # a proxy would bypass the DNS pin
+
+
+def test_read_text_capped_streams_and_caps():
+    from swe_agent.tools import _net
+
+    class FakeStream:
+        encoding = "utf-8"
+        closed = False
+
+        def iter_content(self, n):
+            for _ in range(10_000):
+                yield b"x" * 8192
+
+        def close(self):
+            self.closed = True
+
+    fs = FakeStream()
+    out = _net.read_text_capped(fs, max_bytes=10_000)
+    assert 10_000 <= len(out) < 10_000 + 8192 and fs.closed  # stopped near the cap, closed
+
+
+def test_read_text_capped_fallback_on_text_double():
+    from swe_agent.tools import _net
+    assert _net.read_text_capped(_fake_resp(200, "hello")) == "hello"
+
+
 def test_validate_non_object_param_location():
     errs = custom.validate_def({"name": "x", "description": "d",
                                 "http": {"method": "GET", "url": "https://api.x", "param_location": "oops"}})
@@ -213,7 +249,7 @@ def test_safe_request_same_origin_302_keeps_params_converts_to_get(monkeypatch):
             return _fake_resp(302, "", location="https://api.example/search/")  # same origin
         return _fake_resp(200, "ok")
 
-    monkeypatch.setattr(_net.requests, "request", fake_request)
+    monkeypatch.setattr(_net._SESSION, "request", fake_request)
     _net.safe_request("POST", "https://api.example/search", params={"q": "x"}, json={"b": 1})
     assert seen[0]["params"] == {"q": "x"} and seen[0]["json"] == {"b": 1} and seen[0]["method"] == "POST"
     # same-origin hop: query preserved, 302 converts POST->GET and drops body
@@ -368,7 +404,7 @@ def test_safe_request_strips_auth_and_body_on_cross_origin_redirect(monkeypatch)
             return _fake_resp(302, "", location="https://other.example/next")  # cross-origin
         return _fake_resp(200, "ok")
 
-    monkeypatch.setattr(_net.requests, "request", fake_request)
+    monkeypatch.setattr(_net._SESSION, "request", fake_request)
     _net.safe_request("POST", "https://api.example/start",
                       headers={"Authorization": "Bearer T", "X-Api-Key": "K"},
                       json={"secret": "x"})

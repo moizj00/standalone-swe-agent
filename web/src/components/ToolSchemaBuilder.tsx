@@ -32,8 +32,11 @@ export const ToolSchemaBuilder = () => {
     fetch('/api/tools')
       .then(r => (r.ok ? r.json() : null))
       .then(data => {
+        // Prefer `reserved` (all names incl. aliases like bash/cat/list_dir) so the
+        // shadow check matches the server; fall back to canonical declaration names.
         const list = Array.isArray(data) ? data : (data?.tools ?? []);
-        setBuiltinNames(new Set(list.map((t: any) => t?.name).filter(Boolean)));
+        const names: string[] = data?.reserved ?? list.map((t: any) => t?.name);
+        setBuiltinNames(new Set(names.filter(Boolean)));
       })
       .catch(() => {});
   }, []);
