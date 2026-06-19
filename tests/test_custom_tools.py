@@ -120,6 +120,39 @@ def test_validate_path_param_without_placeholder():
     assert any("placeholder" in e for e in errs)
 
 
+def test_validate_url_placeholder_requires_param():
+    errs = custom.validate_def({"name": "x", "description": "d", "parameters": _params(),
+                                "http": {"method": "GET", "url": "https://api.x/users/{id}"}})
+    assert any("placeholder" in e for e in errs)
+
+
+def test_validate_rejects_host_placeholder():
+    errs = custom.validate_def({"name": "x", "description": "d", "parameters": _params("host"),
+                                "http": {"method": "GET", "url": "https://{host}/v1"}})
+    assert any("host" in e for e in errs)
+
+
+def test_origin_normalizes_default_port():
+    from swe_agent.tools import _net
+    assert _net._origin("https://h/x") == _net._origin("https://h:443/y")
+    assert _net._origin("http://h/x") == _net._origin("http://h:80/y")
+
+
+def test_required_argument_enforced(monkeypatch, tmp_path):
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return _fake_resp(200, "ok")
+
+    monkeypatch.setattr(custom, "safe_request", fake)
+    spec = custom.build_toolspec({"name": "f", "description": "d",
+                                  "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+                                  "http": {"method": "GET", "url": "https://api.x/{id}", "param_location": {"id": "path"}}})
+    out = spec.impl(_ctx(tmp_path))  # required `id` omitted
+    assert "missing required" in out and called["n"] == 0  # request never sent
+
+
 def test_validate_non_dict_headers():
     errs = custom.validate_def({"name": "x", "description": "d",
                                 "http": {"method": "GET", "url": "https://api.x", "headers": ["bad"]}})

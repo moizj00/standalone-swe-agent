@@ -99,6 +99,18 @@ def validate_def(defn: dict) -> List[str]:
                     reason = "malformed URL"
                 if reason:
                     errors.append(f"tool {name!r}: {reason}")
+                # Placeholders are only safe in the path/query. A {host}/{port} in the
+                # scheme/authority would let a model-supplied arg redirect the tool's
+                # auth headers to an arbitrary origin.
+                authority = re.match(r"^https?://[^/?#]*", url)
+                if authority and "{" in authority.group(0):
+                    errors.append(f"tool {name!r}: URL placeholders are only allowed in the path/query, not the host")
+                # Every {placeholder} must map to a declared parameter, or _render
+                # filters the (undeclared) arg out and the literal {x} URL is called.
+                declared = set((defn.get("parameters") or {}).get("properties") or {})
+                for ph in _PLACEHOLDER_RE.findall(url):
+                    if ph not in declared:
+                        errors.append(f"tool {name!r}: URL placeholder '{{{ph}}}' has no matching parameter")
             headers = http.get("headers")
             if headers is not None and not isinstance(headers, dict):
                 errors.append(f"tool {name!r}: http.headers must be an object")
@@ -205,10 +217,16 @@ def build_toolspec(defn: dict) -> ToolSpec:
     method = str(http.get("method", "GET")).upper()
     has_endpoint = bool(http.get("url"))
     secrets = _collect_secrets(http)
+    required = [str(r) for r in ((defn.get("parameters") or {}).get("required") or [])]
 
     def impl(ctx: ToolContext, **args) -> str:
         if not has_endpoint:
             return f"[custom tool '{name}' has no endpoint configured]"
+        missing = [r for r in required if r not in args]
+        if missing:
+            # function calling isn't a strict validator; refuse rather than send a
+            # broadened request (e.g. a missing id turning a targeted call wide).
+            return f"Error calling '{name}': missing required argument(s): {', '.join(missing)}"
         try:
             url, query, headers, body = _render(defn, args)
             r = safe_request(method, url, headers=headers, params=query or None, json=body)

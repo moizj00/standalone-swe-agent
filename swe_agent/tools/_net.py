@@ -57,10 +57,17 @@ def ssrf_check(url: str) -> Optional[str]:
 
 
 def _origin(url: str):
-    """(scheme, host, port) for redirect same-origin checks; None if unparseable."""
+    """(scheme, host, port) for redirect same-origin checks; None if unparseable.
+
+    The port is normalized to the scheme default so https://h and https://h:443
+    (a canonicalizing proxy redirect) count as the SAME origin and don't trip the
+    cross-origin header/body stripping.
+    """
     try:
         p = urlparse(url)
-        return (p.scheme, p.hostname, p.port)
+        scheme = p.scheme
+        port = p.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
+        return (scheme, p.hostname, port)
     except ValueError:
         return None
 

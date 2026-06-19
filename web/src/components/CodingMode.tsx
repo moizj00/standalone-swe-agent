@@ -229,11 +229,16 @@ export const CodingMode = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(listToSave)
       });
-      if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      // The /api/tools registry is READ-ONLY (the agent's built-in tools live in
+      // Python). Only mutate the displayed list if the server truly saved — never
+      // optimistically, or a tool would look "armed" here while the agent never
+      // receives it. Define runnable custom tools in the Tool Builder tab instead.
+      if (response.ok && data.success) {
         setToolsList(listToSave);
       } else {
-        const data = await response.json();
-        alert(data.error || "Failed to save tools on backend.");
+        alert(data.message || data.error ||
+          "This registry is read-only. Create runnable custom tools in the Tool Builder tab.");
       }
     } catch (err: any) {
       alert("Error saving tools: " + err.message);
@@ -386,7 +391,8 @@ export const CodingMode = () => {
                <p className="flex items-center gap-2 mt-2"><Network className="h-4 w-4 text-emerald-400"/> System operational status bound.</p>
              </div>
 
-             {/* Armed tool tags */}
+             {/* Armed tool tags: built-in registry tools + the callable custom tools
+                 actually sent with each request (those with an endpoint). */}
              <div className="flex flex-wrap items-center gap-2 border-b border-slate-900 pb-4">
                <span className="text-xs text-slate-500 uppercase font-sans tracking-wide">Dynamic Toolsets:</span>
                {toolsList.map(tool => (
@@ -394,7 +400,12 @@ export const CodingMode = () => {
                    {tool.name}()
                  </span>
                ))}
-               {toolsList.length === 0 && (
+               {customSchemas.filter(s => s.http && s.http.url.trim()).map(s => (
+                 <span key={s.id} className="text-xs font-mono bg-slate-900 text-emerald-300 font-semibold px-2 py-0.5 rounded border border-emerald-950 flex items-center gap-1 hover:bg-slate-800 cursor-help" title={`custom: ${s.description}`}>
+                   {s.name}()
+                 </span>
+               ))}
+               {toolsList.length === 0 && customSchemas.length === 0 && (
                  <span className="text-xs font-serif italic text-amber-500">No tools loaded (Standard Conversational Mode)</span>
                )}
              </div>
@@ -544,8 +555,12 @@ export const CodingMode = () => {
       <div className="space-y-6">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
-            <h3 className="text-lg font-bold tracking-tight">Gemini Tool Schema Registry</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400">Develop, register, and inspect function declarations that Gemini can execute natively.</p>
+            <h3 className="text-lg font-bold tracking-tight">Agent Tool Registry (read-only)</h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              The agent's built-in tools, defined in Python. To create runnable custom
+              API tools, use the <span className="font-semibold">Tool Builder</span> tab —
+              edits here are not sent to the agent.
+            </p>
           </div>
           <div className="flex gap-3">
             <button onClick={handleResetToDefaults} className="flex items-center gap-2 text-xs font-semibold px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
