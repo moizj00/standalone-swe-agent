@@ -27,6 +27,8 @@ class ToolContext:
     base_url: Optional[str] = None
     num_ctx: Optional[int] = None
     temperature: Optional[float] = None
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
     # When True, resolve() rejects any path that escapes cwd (absolute paths and
     # ../ traversal). Off for the CLI (the operator may want absolute paths); the
     # HTTP server turns it ON so a network-driven agent cannot read/write outside

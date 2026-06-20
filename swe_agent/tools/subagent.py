@@ -11,7 +11,7 @@ import uuid
 from typing import Optional
 
 from ..config import (DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
-                      DEFAULT_TEMPERATURE, SUBAGENT_MAX_WORKERS)
+                      DEFAULT_PROVIDER, DEFAULT_TEMPERATURE, SUBAGENT_MAX_WORKERS)
 from .base import ToolContext, ToolSpec, register
 
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=SUBAGENT_MAX_WORKERS)
@@ -30,8 +30,13 @@ def spawn_subagent(ctx: ToolContext, task: str, description: str,
     num_ctx = ctx.num_ctx or DEFAULT_NUM_CTX
     temperature = ctx.temperature if ctx.temperature is not None else DEFAULT_TEMPERATURE
 
-    fut = _EXECUTOR.submit(run_subagent, task, description, use_model, use_cwd,
-                           base_url, num_ctx, temperature, ctx.approval)
+    provider = ctx.provider or DEFAULT_PROVIDER
+    api_key = ctx.api_key or ""
+    fut = _EXECUTOR.submit(
+        run_subagent, task, description, use_model, use_cwd,
+        base_url, num_ctx, temperature, ctx.approval,
+        provider=provider, api_key=api_key,
+    )
     _RESULTS[sub_id] = fut
     _META[sub_id] = description
     return (f"Spawned sub-agent {sub_id} ('{description}'), running in parallel. "

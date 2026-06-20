@@ -1,0 +1,87 @@
+{
+  "name": "notion-query-data-sources",
+  "description": "Query data from Notion databases using SQL or by specifying a view.\nBy default, uses SQL mode to execute SQLite queries across one or more data sources. Alternatively, use view mode to execute a database view's existing filters and sorts.\nPrerequisites:\n1. Use the \"fetch\" tool first to get database schema and data source URLs\n2. Data source URLs are found in <data-source url=\"...\"> tags in fetch results\n\nSQL mode (default):\nExecute custom SQLite queries across one or more data sources.\n- Use data source URLs as table names in your query\n- Supports parameterized queries for security\n- Checkbox values: use \"__YES__\" for checked, \"__NO__\" for unchecked\n\nExamples:\n1. Simple query without explicit mode (defaults to SQL): { \"data\": { \"data_source_urls\": [\"collection://f336d0bc-b841-465b-8045-024475c079dd\"], \"query\": \"SELECT * FROM \"collection://f336d0bc-b841-465b-8045-024475c079dd\" LIMIT 10\" } }\n\n2. Query with parameters: { \"data\": { \"mode\": \"sql\", \"data_source_urls\": [\"collection://abc123\"], \"query\": \"SELECT * FROM \"collection://abc123\" WHERE Status = ? AND Priority = ?\", \"params\": [\"In Progress\", \"High\"] } }\n\n3. Query checkboxes: { \"data\": { \"data_source_urls\": [\"collection://def456\"], \"query\": \"SELECT * FROM \"collection://def456\" WHERE Completed = ?\", \"params\": [\"__YES__\"] } }\n\nView mode: Execute a specific database view's query with its filters and sorts. When the response has \"has_more\": true, pass its \"next_cursor\" as \"start_cursor\" in a follow-up view-mode request.\nExample: { \"data\": { \"mode\": \"view\", \"view_url\": \"https://www.notion.so/workspace/Tasks-DB-abc123?v=def456\" } }\nCommon use cases:\n- Aggregate data across databases\n- Filter records by complex conditions\n- Export data for analysis\n- Validate data quality\n- Generate reports from database content",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "data": {
+        "description": "The data required for querying data sources",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "data_source_urls": {
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Array of data source URLs to query. These are obtained from the fetch tool in the format: collection://f336d0bc-b841-465b-8045-024475c079dd"
+              },
+              "query": {
+                "type": "string",
+                "description": "SQLite query to execute against the data sources. Use the data source URL as the table name in your query. Example: SELECT * FROM \"collection://...\" WHERE ..."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "sql"
+                ]
+              },
+              "params": {
+                "description": "Optional array of parameter values for parameterized queries. For example, if query contains WHERE status = ?, provide the value here. Use \"__YES__\" for checked checkboxes and \"__NO__\" for unchecked checkboxes.",
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "data_source_urls",
+              "query"
+            ],
+            "additionalProperties": {}
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "view"
+                ]
+              },
+              "view_url": {
+                "type": "string",
+                "description": "URL of a specific database view to query. Example: https://www.notion.so/workspace/db-id?v=view-id"
+              },
+              "start_cursor": {
+                "description": "Cursor for pagination. Use the next_cursor value from the previous response to get the next page.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "page_size": {
+                "description": "Number of rows to return per page (default: 100, max: 100).",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              }
+            },
+            "required": [
+              "mode",
+              "view_url"
+            ],
+            "additionalProperties": {}
+          }
+        ]
+      }
+    },
+    "required": [
+      "data"
+    ],
+    "additionalProperties": {}
+  }
+}

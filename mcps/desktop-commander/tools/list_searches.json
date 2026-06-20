@@ -1,0 +1,10 @@
+{
+  "name": "list_searches",
+  "description": "\n                        List all active searches.\n                        \n                        Shows search IDs, search types, patterns, status, and runtime.\n                        Similar to list_sessions for terminal processes. Useful for managing\n                        multiple concurrent searches.\n                        \n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

@@ -27,10 +27,14 @@ def task_complete(ctx: ToolContext, final_summary: str,
 
 register(ToolSpec(
     name="task_complete",
-    description="Signal that the task is fully complete and verified. Provide final_summary, confidence "
-                "(low/medium/high), and files_changed. Calling this ENDS the run -- do not call other tools after it.",
+    description="Signal that the task is fully complete and verified. final_summary must state what changed "
+                "AND how to verify (concrete command or run_tests/run_linter). If code was modified, run "
+                "verification before calling this. Calling this ENDS the run.",
     parameters={"type": "object", "properties": {
-        "final_summary": {"type": "string", "description": "What you did and how to verify it"},
+        "final_summary": {
+            "type": "string",
+            "description": "What changed + how to verify (e.g. 'Added type hint to auth.ts; verify with: npx tsc --noEmit')",
+        },
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "files_changed": {"type": "array", "items": {"type": "string"}},
     }, "required": ["final_summary"]},

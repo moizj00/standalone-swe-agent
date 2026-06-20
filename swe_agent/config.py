@@ -9,13 +9,20 @@ import os
 from enum import Enum
 from pathlib import Path
 
+# ----- Provider selection ---------------------------------------------------
+# ollama | minimax | kimi | nemotron | openai
+DEFAULT_PROVIDER = os.environ.get("SWE_AGENT_PROVIDER", "nemotron").lower()
+
 # ----- Ollama transport -----------------------------------------------------
 # NOTE: this is the NATIVE Ollama endpoint base (no trailing /v1). We use
 # /api/chat because the OpenAI-compatible /v1 endpoint cannot set num_ctx and
 # has buggy streaming-with-tools.
 DEFAULT_OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-DEFAULT_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "hhao/qwen2.5-coder-tools:7b")
-DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
+DEFAULT_OLLAMA_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "qwen2.5-coder:7b")
+MODEL_PREFERENCES = ["qwen2.5-coder:7b"]
+DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL  # backward-compatible alias
+# 32k is ideal on GPU boxes; 8k is safer on ~8GB WSL/CPU-only hosts.
+DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 DEFAULT_TEMPERATURE = float(os.environ.get("OLLAMA_AGENT_TEMPERATURE", "0.2"))
 DEFAULT_TOP_P = float(os.environ.get("OLLAMA_AGENT_TOP_P", "0.9"))
 KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
@@ -40,6 +47,33 @@ WEB_FETCH_MAX_CHARS = 10000
 # ----- Context compaction ---------------------------------------------------
 COMPACT_THRESHOLD = 0.75        # compact when estimated tokens exceed this fraction of num_ctx
 COMPACT_KEEP_RECENT = 6         # most-recent messages always preserved verbatim
+
+# ----- Loop guard -----------------------------------------------------------
+LOOP_GUARD_ENABLED = os.environ.get("LOOP_GUARD_ENABLED", "true").lower() in ("1", "true", "yes")
+LOOP_EXACT_REPEAT_THRESHOLD = int(os.environ.get("LOOP_EXACT_REPEAT_THRESHOLD", "3"))
+LOOP_EXACT_REPEAT_WINDOW = int(os.environ.get("LOOP_EXACT_REPEAT_WINDOW", "8"))
+LOOP_READ_THRASH_MIN = int(os.environ.get("LOOP_READ_THRASH_MIN", "5"))
+LOOP_READ_THRASH_WINDOW = int(os.environ.get("LOOP_READ_THRASH_WINDOW", "10"))
+LOOP_NO_PROGRESS_STEPS = int(os.environ.get("LOOP_NO_PROGRESS_STEPS", "12"))
+LOOP_OSCILLATION_CYCLES = int(os.environ.get("LOOP_OSCILLATION_CYCLES", "2"))
+LOOP_EDIT_RETRY_THRESHOLD = int(os.environ.get("LOOP_EDIT_RETRY_THRESHOLD", "2"))
+LOOP_SUBAGENT_POLL_THRESHOLD = int(os.environ.get("LOOP_SUBAGENT_POLL_THRESHOLD", "4"))
+LOOP_MAX_ESCALATIONS_PER_SESSION = int(os.environ.get("LOOP_MAX_ESCALATIONS_PER_SESSION", "3"))
+
+# Optional cloud escalation (planning-only unstick turn at level 4)
+ESCALATE_MODEL = os.environ.get("SWE_AGENT_ESCALATE_MODEL", "")
+ESCALATE_BASE_URL = os.environ.get("SWE_AGENT_ESCALATE_BASE_URL", "https://api.openai.com/v1")
+ESCALATE_API_KEY = os.environ.get("SWE_AGENT_ESCALATE_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+
+# ----- Quality gate ---------------------------------------------------------
+QUALITY_GATE_ENABLED = os.environ.get("QUALITY_GATE_ENABLED", "true").lower() in ("1", "true", "yes")
+QUALITY_VERIFY_WINDOW = int(os.environ.get("QUALITY_VERIFY_WINDOW", "20"))
+QUALITY_MIN_SUMMARY_CHARS = int(os.environ.get("QUALITY_MIN_SUMMARY_CHARS", "40"))
+
+# ----- Intent gate ----------------------------------------------------------
+INTENT_GATE_ENABLED = os.environ.get("INTENT_GATE_ENABLED", "true").lower() in ("1", "true", "yes")
+INTENT_SCOPE_READ_WINDOW = int(os.environ.get("INTENT_SCOPE_READ_WINDOW", "10"))
+INTENT_SCOPE_BLOCK_AFTER = int(os.environ.get("INTENT_SCOPE_BLOCK_AFTER", "2"))
 
 # ----- Storage --------------------------------------------------------------
 SESSION_DIR = Path(
