@@ -13,7 +13,7 @@ The driver lives at `.claude/skills/run-standalone-swe-agent/smoke.sh` and exerc
 
 ## Prerequisites
 
-Python 3.11 and Node 22 are already on PATH in this container. Playwright's bundled Chromium is at `/opt/node22/lib/node_modules/playwright` — the screenshot driver imports it directly, so you do **not** need `playwright install`.
+Python 3.11 and Node 22 are already on PATH in this container. The screenshot driver resolves Playwright in this order: `$PLAYWRIGHT_MODULE_PATH` → standard `playwright` module → the container-preinstalled `/opt/node22/lib/node_modules/playwright`. On this image the third path hits and you don't need `playwright install`; in other environments either install it locally (`npm install playwright` in `web/`) or point `PLAYWRIGHT_MODULE_PATH` at its `index.mjs`.
 
 ```bash
 pip install -r requirements-dev.txt   # pytest + requests
@@ -38,7 +38,7 @@ What it does, in order (~25 s):
 | 1 | `python -m pytest` — 142 tests, agent loop / tools / server / security / gating |
 | 2 | `python swe_agent.py --dry-run "smoke"` — CLI with the built-in `scripted_mock`, no Ollama |
 | 3 | `python -m swe_agent.server --no-preflight --port 8765 --cwd /tmp` + `curl /api/health` + `curl /api/tools` (expect 35 tools / 41 reserved aliases) |
-| 4 | `cd web && npm run dev` + `node screenshot.mjs coding` — Playwright drives the dashboard to **Coding Mode**, then writes `/tmp/shots/coding.png`. The screenshot is only "real" when step 3 is also up: that's what makes the tab header read `Tool Schema Registry (35)`. |
+| 4 | `cd web && npm run dev` + `node screenshot.mjs coding` — Playwright drives the dashboard to **Coding Mode**, asserts the `Tool Schema Registry (N)` header appears (the React → Node proxy → Python `/api/tools` round-trip), then writes `/tmp/shots/coding.png`. If the count never appears the driver exits non-zero with a `coding-failed.png` for diagnosis. |
 
 Flags:
 
@@ -104,7 +104,7 @@ Both are useless headless without Ollama; use the smoke driver to verify everyth
 ## Gotchas
 
 - **The dashboard tab header is the cheap integration check.** `Tool Schema Registry (35)` means the React app → Node proxy → Python `/api/tools` round-trip succeeded. `Tool Schema Registry` (no count) or `(0)` means the agent server isn't running or `--no-preflight` was forgotten and Ollama isn't reachable.
-- **`npm run dev`'s child node process survives `kill` of the npm shell.** A previous run that exited uncleanly will hold `:3000` and the next `npm run dev` dies with `EADDRINUSE`. `smoke.sh` calls its cleanup hook *before* launching too, but if you're driving manually use `pkill -9 -f 'tsx server.ts'`.
+- **`npm run dev`'s child node process survives `kill` of the npm shell.** A previous run that exited uncleanly will hold `:3000` and the next `npm run dev` dies with `EADDRINUSE`. `smoke.sh` calls its cleanup hook *before* launching too, but if you're driving manually use `pkill -9 -f 'tsx.*server\.ts'`. The literal `tsx server.ts` regex only matches the parent shell — the node child has `tsx/dist/...` in its argv.
 - **`--dry-run` implies `--yolo`.** The scripted mock can't answer approval prompts, so the CLI flips to no-prompt mode automatically. Don't try to combine `--dry-run --plan` and expect read-only — the CLI overrides it.
 - **The CLI defaults to a model preflight.** Without `--no-preflight` (server) or with no `--dry-run` (CLI) the process will try to hit `http://localhost:11434/api/tags` and fail fast if Ollama isn't there. Both flags are the only reason the smoke script runs in this container.
 - **The Coding-Mode browser console shows `ERR_CERT_AUTHORITY_INVALID`** on every page load. It's an external favicon request, harmless — the screenshot driver records it in `errs` but treat it as background noise, not a regression.

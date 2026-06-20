@@ -31,14 +31,20 @@ cd "$REPO"
 SKILL_DIR="$REPO/.claude/skills/run-standalone-swe-agent"
 mkdir -p /tmp/shots
 
-cleanup() {
+# cleanup runs in a subshell so its `set +e` (needed because kill/pkill can
+# fail when the targets are already gone) doesn't leak back into the parent
+# and silently disable errexit for the rest of the script.
+cleanup() (
   set +e
   [[ -n "${AGENT_PID:-}" ]] && kill -9 "$AGENT_PID" 2>/dev/null
   [[ -n "${WEB_PID:-}" ]]   && kill -9 "$WEB_PID"   2>/dev/null
   pkill -9 -f swe_agent.server 2>/dev/null
-  pkill -9 -f 'tsx server.ts'  2>/dev/null
+  # tsx spawns: parent shell `sh -c tsx server.ts` AND a node child whose argv
+  # contains `tsx/dist/...` + `server.ts` (no literal "tsx server.ts" in the
+  # child's cmdline). Match both with a regex.
+  pkill -9 -f 'tsx.*server\.ts'  2>/dev/null
   return 0
-}
+)
 trap cleanup EXIT
 
 # Defensive pre-cleanup: an old run that crashed can leave node holding :3000
@@ -63,9 +69,14 @@ python -m swe_agent.server --no-preflight --port 8765 --cwd /tmp \
 AGENT_PID=$!
 # Poll until the HTTP listener accepts a connection (any 2xx/4xx counts).
 timeout 15 bash -c 'until curl -sf http://127.0.0.1:8765/api/health >/dev/null; do sleep 0.2; done'
-echo "health: $(curl -sf http://127.0.0.1:8765/api/health)"
-echo "tools:  $(curl -sf http://127.0.0.1:8765/api/tools \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d["tools"]), "tools,", len(d["reserved"]), "reserved aliases")')"
+# Capture each probe in its own command so `set -e` + `pipefail` actually
+# surface failures; `echo $(curl ... | python3 ...)` would mask them because
+# `echo` always exits 0.
+HEALTH=$(curl -sf http://127.0.0.1:8765/api/health)
+echo "health: $HEALTH"
+TOOLS=$(curl -sf http://127.0.0.1:8765/api/tools \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d["tools"]), "tools,", len(d["reserved"]), "reserved aliases")')
+echo "tools:  $TOOLS"
 
 if [[ $SKIP_WEB -eq 1 ]]; then
   echo
