@@ -39,7 +39,12 @@ interface ToolSchema {
   };
 }
 
-export const CodingMode = () => {
+interface CodingModeProps {
+  conversationId?: string;
+  userId?: string;
+}
+
+export const CodingMode = ({ conversationId, userId }: CodingModeProps = {}) => {
   const [activeTab, setActiveTab] = useState<'terminal' | 'tools' | 'vscode'>('terminal');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');

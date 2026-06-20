@@ -1,18 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, BarChart3, Moon, Sun, Code2, ListTodo, Shield, Search, Wrench } from 'lucide-react';
+import { LayoutDashboard, BarChart3, Moon, Sun, Code2, ListTodo, Shield, Search, Wrench, LogOut } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { cn } from './utils';
 import { Overview } from './components/Overview';
 import { Analytics } from './components/Analytics';
 import { CodingMode } from './components/CodingMode';
 import { ToolSchemaBuilder } from './components/ToolSchemaBuilder';
+import { ConversationManager } from './components/ConversationManager';
+import { useAuth } from './lib/hooks/useAuth';
 import { mockUsers } from './data/mock';
 
 function App() {
+  const navigate = useNavigate();
+  const { user, signOut } = useAuth();
   const [view, setView] = useState<'overview' | 'analytics' | 'tools' | 'coding'>('overview');
   const [mode, setMode] = useState<'planning' | 'coding'>('planning');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [currentUser] = useState(mockUsers[0]);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const handleLogout = async () => {
+    await signOut();
+    navigate('/sign-in');
+  };
 
   useEffect(() => {
     if (theme === 'dark') {
@@ -26,13 +36,13 @@ function App() {
 
   const renderContent = () => {
     if (mode === 'coding') {
-      return <CodingMode />;
+      return <ConversationManager />;
     }
     switch (view) {
       case 'overview': return <Overview user={currentUser} searchQuery={searchQuery} />;
       case 'analytics': return <Analytics />;
       case 'tools': return <ToolSchemaBuilder />;
-      case 'coding': return <CodingMode />;
+      case 'coding': return <ConversationManager />;
       default: return <Overview user={currentUser} searchQuery={searchQuery} />;
     }
   };
@@ -83,13 +93,21 @@ function App() {
           <div className="flex items-center gap-3 px-2 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <img src={currentUser.avatar} alt="Avatar" className="w-8 h-8 rounded-full border border-slate-300 dark:border-slate-600 bg-white" />
             <div className="flex-1 overflow-hidden">
-              <div className="text-sm font-medium truncate">{currentUser.name}</div>
+              <div className="text-sm font-medium truncate">{user?.name || currentUser.name}</div>
               <div className="text-xs text-slate-500 font-mono flex items-center gap-1">
                 <Shield className="h-3 w-3" />
                 {currentUser.role}
               </div>
             </div>
           </div>
+
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            <LogOut className="h-4 w-4" />
+            Sign Out
+          </button>
         </div>
       </aside>
 
