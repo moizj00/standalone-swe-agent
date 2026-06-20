@@ -57,13 +57,15 @@ def get_subagent_result(ctx: ToolContext, subagent_id: str) -> str:
 
 register(ToolSpec(
     name="spawn_subagent",
-    description="Spawn an independent sub-agent to handle a sub-task in parallel (its own private "
-                "context; only a summary is returned). Use for parallel exploration or implementation.",
+    description="Spawn an independent sub-agent to run a self-contained sub-task in parallel; it gets its "
+                "own private context and only its final summary returns to you. Use to delegate independent "
+                "work (e.g. explore one module while you read another, or implement separate files at once); "
+                "keep to 2-3 running at a time. Returns a subagent_id you later pass to get_subagent_result.",
     parameters={"type": "object", "properties": {
-        "task": {"type": "string", "description": "The full task prompt for the sub-agent"},
-        "description": {"type": "string", "description": "Short 3-5 word label"},
-        "model": {"type": "string", "description": "Model override (default: same as parent)"},
-        "cwd": {"type": "string", "description": "Working directory (default: parent cwd)"},
+        "task": {"type": "string", "description": "Full, self-contained task prompt for the sub-agent; it cannot see your context, so include all needed detail. E.g. 'Find where auth tokens are validated in src/ and summarize the flow'"},
+        "description": {"type": "string", "description": "Short 3-5 word label for tracking, e.g. 'explore auth flow'"},
+        "model": {"type": "string", "description": "Model override (default: same model as parent)"},
+        "cwd": {"type": "string", "description": "Working directory for the sub-agent (default: parent cwd)"},
     }, "required": ["task", "description"]},
     impl=spawn_subagent, mutating=True, category="exec",
 ))
@@ -88,15 +90,17 @@ def list_active_subagents(ctx: ToolContext) -> str:
 
 register(ToolSpec(
     name="get_subagent_result",
-    description="Collect the summary from a sub-agent previously started with spawn_subagent.",
-    parameters={"type": "object", "properties": {"subagent_id": {"type": "string"}},
+    description="Collect the final summary from a sub-agent started with spawn_subagent. If it is still "
+                "running, you get a 'still running' notice -- poll again shortly rather than blocking.",
+    parameters={"type": "object", "properties": {"subagent_id": {"type": "string", "description": "The id returned by spawn_subagent, e.g. '1a2b3c4d'"}},
                 "required": ["subagent_id"]},
     impl=get_subagent_result, category="read",
 ))
 
 register(ToolSpec(
     name="list_active_subagents",
-    description="List sub-agents spawned this session with their id, status (running/done/failed), and label.",
+    description="List every sub-agent spawned this session with its id, status (running/done/failed), and "
+                "label. Use to check what is still running before spawning more or collecting results.",
     parameters={"type": "object", "properties": {}, "required": []},
     impl=list_active_subagents, category="read",
 ))

@@ -52,13 +52,15 @@ def notebook_edit(ctx: ToolContext, path: str, cell_index: int, new_source: str 
 
 register(ToolSpec(
     name="notebook_edit",
-    description="Edit a Jupyter notebook (.ipynb): replace, insert, or delete a cell by index.",
+    description="Edit a Jupyter notebook (.ipynb): replace, insert, or delete a cell by index. "
+                "SAFETY: this writes the .ipynb file on disk in place and clears outputs/execution_count of affected code cells; "
+                "the change is not reversible, so confirm the cell_index first. Only for .ipynb files -- use edit/write_file for plain text.",
     parameters={"type": "object", "properties": {
-        "path": {"type": "string"},
-        "cell_index": {"type": "integer", "description": "0-based cell index"},
-        "new_source": {"type": "string", "description": "New cell source (for replace/insert)"},
-        "mode": {"type": "string", "enum": ["replace", "insert", "delete"], "default": "replace"},
-        "cell_type": {"type": "string", "enum": ["code", "markdown"], "default": "code"},
+        "path": {"type": "string", "description": "Path to the .ipynb notebook, e.g. 'analysis/explore.ipynb'."},
+        "cell_index": {"type": "integer", "description": "0-based index of the target cell; for insert, the position to insert at."},
+        "new_source": {"type": "string", "description": "New cell source code/text, used for replace and insert (ignored for delete)."},
+        "mode": {"type": "string", "description": "replace overwrites the cell at cell_index, insert adds a new cell at cell_index, delete removes it.", "enum": ["replace", "insert", "delete"], "default": "replace"},
+        "cell_type": {"type": "string", "description": "Cell type for an inserted cell: code or markdown.", "enum": ["code", "markdown"], "default": "code"},
     }, "required": ["path", "cell_index"]},
     impl=notebook_edit, mutating=True, category="write",
 ))

@@ -37,12 +37,14 @@ def todo_read(ctx: ToolContext) -> str:
 
 register(ToolSpec(
     name="todo_write",
-    description="Create or update a visible, structured todo list to plan and track multi-step tasks.",
+    description="Create or update a visible, structured todo list to plan and track multi-step work. "
+                "Use at the start of any task with 3+ steps, and call again to flip items to in_progress/completed as you go. "
+                "Passing the full list replaces the previous one, so include every item each time.",
     parameters={"type": "object", "properties": {
-        "todos": {"type": "array", "items": {"type": "object", "properties": {
-            "id": {"type": "string"},
-            "content": {"type": "string"},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
+        "todos": {"type": "array", "description": "The complete todo list; this replaces any existing list.", "items": {"type": "object", "properties": {
+            "id": {"type": "string", "description": "Stable identifier for the item, e.g. '1'."},
+            "content": {"type": "string", "description": "Short description of the step, e.g. 'Add input validation to login form'."},
+            "status": {"type": "string", "description": "One of pending, in_progress, completed, cancelled. Keep exactly one item in_progress at a time.", "enum": ["pending", "in_progress", "completed", "cancelled"]},
         }, "required": ["content", "status"]}},
     }, "required": ["todos"]},
     impl=todo_write, category="meta",
@@ -50,7 +52,7 @@ register(ToolSpec(
 
 register(ToolSpec(
     name="todo_read",
-    description="Read the current visible todo list (from .agent_todos.json).",
+    description="Read back the current todo list (from .agent_todos.json). Use to recall remaining steps before deciding what to do next; takes no arguments.",
     parameters={"type": "object", "properties": {}, "required": []},
     impl=todo_read, category="read",
 ))
