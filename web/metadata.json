@@ -1,0 +1,6 @@
+{
+  "name": "Project Board Dashboard",
+  "description": "An interactive project boards dashboard with integrated coding agents, custom tool schema builders, and VS Code synchronization support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
