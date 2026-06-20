@@ -27,12 +27,30 @@ class ToolContext:
     base_url: Optional[str] = None
     num_ctx: Optional[int] = None
     temperature: Optional[float] = None
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    # When True, resolve() rejects any path that escapes cwd (absolute paths and
+    # ../ traversal). Off for the CLI (the operator may want absolute paths); the
+    # HTTP server turns it ON so a network-driven agent cannot read/write outside
+    # the workspace it was pointed at.
+    confine: bool = False
 
     def resolve(self, path: Optional[str]) -> Path:
-        """Resolve a possibly-relative path against the logical working dir."""
+        """Resolve a possibly-relative path against the logical working dir.
+
+        Raises ValueError if ``confine`` is set and the path would escape cwd;
+        tool impls let that surface as a clean tool error via Agent._dispatch.
+        """
         p = Path(path) if path else Path(".")
         if not p.is_absolute():
             p = self.cwd / p
+        if self.confine:
+            base = self.cwd.resolve()
+            target = p.resolve()
+            if target != base and base not in target.parents:
+                raise ValueError(
+                    f"path '{path}' escapes the workspace ({base}); refused (confined mode)")
+            return target
         return p
 
 

@@ -27,13 +27,16 @@ def task_complete(ctx: ToolContext, final_summary: str,
 
 register(ToolSpec(
     name="task_complete",
-    description="Signal that the task is FULLY complete and verified. Call this once, only after all work is done and "
-                "checked -- it immediately ENDS the run, so any remaining edits, commands, or checks must happen BEFORE "
-                "this call, never after. Provide final_summary, and optionally confidence (low/medium/high) and files_changed.",
+    description="Signal that the task is fully complete and verified. final_summary must state what changed "
+                "AND how to verify (concrete command or run_tests/run_linter). If code was modified, run "
+                "verification before calling this. Calling this ENDS the run.",
     parameters={"type": "object", "properties": {
-        "final_summary": {"type": "string", "description": "What you did and how the user can verify it, e.g. 'Added null check in parse(); run npm test'."},
-        "confidence": {"type": "string", "description": "Your confidence the task is correct and complete: low, medium, or high.", "enum": ["low", "medium", "high"]},
-        "files_changed": {"type": "array", "description": "Paths of files you created or modified, e.g. ['src/app.py'].", "items": {"type": "string"}},
+        "final_summary": {
+            "type": "string",
+            "description": "What changed + how to verify (e.g. 'Added type hint to auth.ts; verify with: npx tsc --noEmit')",
+        },
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "files_changed": {"type": "array", "items": {"type": "string"}},
     }, "required": ["final_summary"]},
     impl=task_complete, category="meta",
 ))

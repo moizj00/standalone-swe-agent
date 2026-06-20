@@ -1,0 +1,10 @@
+{
+  "name": "list_processes",
+  "description": "\n                        List all running processes.\n                        \n                        Returns process information including PID, command name, CPU usage, and memory usage.\n                        \n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

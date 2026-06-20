@@ -8,7 +8,7 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 
 ## Features
 
-- **Full tool suite** (~23 tools): file system ops (list, read, write, edit, delete, move, glob, info), advanced search (grep with context), rich execution (run_command/bash with background, timeout, description), todo management, git/patch helpers (apply_patch, git_status, git_diff, etc.), dedicated test runner, web research (search, open_page), and powerful sub-agent spawning (20+ simultaneous).
+- **Full tool suite** (35 advertised tools): file system ops (read, write, edit, multi_edit, ls, glob, info, move, delete, mkdir), advanced search (grep with context), rich execution (run_command/bash with background, timeout, description), todo management, git/patch helpers (apply_patch, git_status, git_diff, git_log, git_show, git_commit), dedicated test runner, linter/type-checker, project-overview helpers, web research (web_search, web_fetch), and powerful sub-agent spawning (20+ simultaneous).
 - **Sub-agent isolation**: Each subagent has its own private message history and tool state. Main agent only sees spawn confirmation + clean summary result.
 - **One-line launcher**: `ollama-agent "your task here"`
 - **Ollama-native**: Uses Ollama's native `/api/chat` API (sets `num_ctx`, streams tool calls). Default model hhao/qwen2.5-coder-tools:7b.
@@ -48,40 +48,67 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 
 ## Core Components
 
-- `swe_agent.py` — The main agent with full tool-calling loop and subagent support.
+- `swe_agent/` — The agent package: tool-calling loop, tools, Ollama transport, sessions.
+- `swe_agent.py` — Thin launcher shim into the package CLI.
+- `swe_agent/server.py` — HTTP/SSE bridge so a web UI can drive the agent (see Web UI).
+- `web/` — A React/Vite dashboard whose coding chat streams from the agent.
 - `ollama-agent` — Portable bash launcher (resolves paths, ensures server, defaults to coder model).
 - `ensure-ollama.sh` — Idempotent helper to start Ollama server if needed.
+
+## Web UI (dashboard)
+
+A browser front-end lives in `web/` (a vendored project-board dashboard). Its
+coding chat is wired to the agent over a small HTTP/SSE server — token streaming
+and live tool activity included.
+
+```bash
+# 1) start the agent server (Ollama running):
+python -m swe_agent.server --cwd /path/to/workspace --approval read-only
+# 2) start the dashboard:
+cd web && npm install && npm run dev   # http://localhost:3000
+```
+
+The server binds `127.0.0.1` and defaults to READ_ONLY; pass `--token` to require
+a bearer token. Details: [docs/dashboard-integration.md](docs/dashboard-integration.md).
 
 ## Tools Overview
 
 **File System**
-- list_dir (recursive support), glob, get_file_info
-- view_file, read_multiple_files
-- write_file, search_replace, apply_patch
+- ls (recursive support), glob, get_file_info, create_directory
+- read_file, read_multiple_files
+- write_file, edit, multi_edit, apply_patch
 - delete_file, move_file
 
 **Search**
 - grep (regex + glob + context_lines)
 
 **Execution**
-- run_command, bash (with cwd, description, timeout, background)
+- run_command (aliases: bash, shell; with cwd, description, timeout, background)
+- bash_output, kill_bash (poll / stop background processes)
 
 **Planning**
-- todo_write (structured visible task lists, persisted to .agent_todos.json)
+- todo_write / todo_read (structured visible task lists)
 
 **Git & Patching**
-- git_status, git_diff, git_log, git_commit
+- git_status, git_diff, git_log, git_show, git_commit
 - apply_patch (unified diffs / git apply)
 
-**Testing**
+**Testing & Quality**
 - run_tests (auto-detects pytest, npm test, cargo, go test, etc.)
+- run_linter, run_type_checker
+
+**Codebase Analysis**
+- get_project_overview, get_directory_tree
 
 **Research**
-- web_search, open_page
+- web_search, web_fetch
 
 **Sub-agents (Parallelism)**
 - spawn_subagent (task, description; supports 20+ concurrent)
-- get_subagent_result (poll for summary)
+- get_subagent_result (poll for summary), list_active_subagents
+
+**Completion**
+- task_complete (explicit, structured end-of-run signal)
 
 Sub-agents have **completely private context**. They never leak their full history or intermediate tool calls into the parent. Only a concise summary is returned.
 
@@ -97,6 +124,22 @@ Example usage in agent:
 ```
 Spawn several sub-agents for different parts of the codebase, then collect summaries.
 ```
+
+## Testing
+
+The agent loop, tool-call parsing, and approval gating are covered by a fast,
+hermetic test suite that needs **no running Ollama server** — the model is
+driven through `Agent`'s built-in `mock` hook.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Tests live under `tests/`. They cover inline tool-call recovery (including the
+fenced-JSON double-dispatch regression), native-call normalization, the
+step/termination loop, observation truncation, and the full approval-gating
+matrix (read-only / default / auto-accept / yolo + danger detection).
 
 ## Requirements
 

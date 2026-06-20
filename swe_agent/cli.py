@@ -8,25 +8,33 @@ from pathlib import Path
 from . import llm, prompts
 from .agent import Agent
 from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
-                     DEFAULT_TEMPERATURE, MAX_STEPS)
+                     DEFAULT_OLLAMA_MODEL, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE,
+                     INTENT_GATE_ENABLED, LOOP_GUARD_ENABLED, MAX_STEPS, QUALITY_GATE_ENABLED)
+from .intent_gate import IntentGate
+from .loop_guard import LoopGuard, make_cloud_escalate_cb
+from .providers import CLOUD_PROVIDER_NAMES, check_cloud_provider, get_provider, is_cloud_provider
+from .quality_gate import QualityGate
 from .session import (Session, build_env_context, estimate_tokens, load_project_instructions)
 from .tools import ADVERTISED
 from .tools.base import ToolContext
 from .tools.exec import BackgroundRegistry
 
-BANNER = """\033[1mOllama SWE Agent\033[0m — interactive mode.
+BANNER = """\033[1mSWE Agent\033[0m — interactive mode.
 Type a task, or a slash command. /help for commands, /exit to quit."""
 
 HELP_TEXT = """Commands:
   /help              show this help
   /tools             list available tools
   /model [name]      show or switch the model
+  /provider [name]   show or switch provider (minimax, kimi, nemotron, openai, ollama)
   /plan              enter plan mode (read-only)
   /approve           leave plan mode (default approval)
   /compact           summarize & shrink the conversation
   /clear             clear the conversation (keep system prompt)
   /resume [id]       resume a saved session (no id: list sessions)
   /cost              show context size / step stats
+  /loop              show loop-guard detector state (alias: /loop-stats)
+  /loop-stats        show loop-guard detector state
   /exit              quit"""
 
 
@@ -67,26 +75,70 @@ def make_approval_cb(state: dict):
     return cb
 
 
+def resolve_runtime_config(args) -> None:
+    """Fill model/base_url/api_key from provider preset when using a cloud backend."""
+    provider = (args.provider or DEFAULT_PROVIDER).lower()
+    args.provider = provider
+
+    if is_cloud_provider(provider):
+        spec = get_provider(provider)
+        if args.model in (DEFAULT_MODEL, DEFAULT_OLLAMA_MODEL):
+            args.model = spec.default_model
+        if args.base_url == DEFAULT_OLLAMA_BASE:
+            args.base_url = spec.base_url
+        args.api_key = spec.resolve_api_key()
+        return
+
+    args.api_key = ""
+    if args.base_url == DEFAULT_OLLAMA_BASE and provider == "ollama":
+        return
+    if provider == "ollama":
+        args.base_url = DEFAULT_OLLAMA_BASE
+
+
 # --------------------------------------------------------------------------- build
 
-def build_agent(args, approval: ApprovalMode, mock=None):
+def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""):
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
     env = build_env_context(cwd)
     proj, proj_path = load_project_instructions(cwd)
     system = prompts.build_system_prompt(
         env_context=env, project_instructions=proj,
         plan_mode=(approval == ApprovalMode.READ_ONLY),
+        provider=args.provider,
     )
     state = {"always_tools": set(), "always_prefixes": set()}
     ctx = ToolContext(
         cwd=cwd, approval=approval, approve_cb=make_approval_cb(state),
         bg_registry=BackgroundRegistry(), model=args.model, base_url=args.base_url,
         num_ctx=args.num_ctx, temperature=args.temperature,
+        provider=args.provider, api_key=args.api_key,
     )
+    if getattr(args, "loop_guard", LOOP_GUARD_ENABLED):
+        loop_guard = LoopGuard(
+            enabled=True,
+            original_task=original_task,
+            verbose=True,
+            yolo=(approval == ApprovalMode.YOLO),
+            cloud_escalate_cb=make_cloud_escalate_cb(),
+        )
+    else:
+        loop_guard = LoopGuard(enabled=False)
+    if getattr(args, "quality_gate", QUALITY_GATE_ENABLED):
+        quality_gate = QualityGate(enabled=True, verbose=True)
+    else:
+        quality_gate = QualityGate(enabled=False)
+    if getattr(args, "intent_gate", INTENT_GATE_ENABLED):
+        intent_gate = IntentGate(enabled=True, original_task=original_task, verbose=True)
+    else:
+        intent_gate = IntentGate(enabled=False)
     agent = Agent(
         model=args.model, ctx=ctx, system_prompt=system, stream=not args.no_stream,
         verbose=True, max_steps=args.max_steps, base_url=args.base_url,
         num_ctx=args.num_ctx, temperature=args.temperature, mock=mock,
+        provider=args.provider, api_key=args.api_key,
+        loop_guard=loop_guard, quality_gate=quality_gate, intent_gate=intent_gate,
+        original_task=original_task,
     )
     if proj_path:
         print(f"\033[2mLoaded project instructions from {proj_path}\033[0m")
@@ -112,6 +164,21 @@ def handle_slash(agent: Agent, ctx: ToolContext, line: str):
             print(f"Model set to {arg}")
         else:
             print(f"Current model: {agent.model}")
+    elif cmd == "provider":
+        if arg:
+            agent.provider = ctx.provider = arg.lower()
+            spec = get_provider(arg)
+            if spec:
+                agent.base_url = ctx.base_url = spec.base_url
+                agent.api_key = ctx.api_key = spec.resolve_api_key()
+                agent.model = ctx.model = spec.default_model
+                print(f"Provider set to {spec.label} (model={spec.default_model})")
+            else:
+                agent.base_url = ctx.base_url = DEFAULT_OLLAMA_BASE
+                agent.api_key = ctx.api_key = ""
+                print(f"Provider set to ollama")
+        else:
+            print(f"Current provider: {agent.provider}")
     elif cmd == "plan":
         ctx.approval = ApprovalMode.READ_ONLY
         print("Plan mode ON (read-only — no mutations).")
@@ -125,8 +192,26 @@ def handle_slash(agent: Agent, ctx: ToolContext, line: str):
         print("Conversation cleared (system prompt kept).")
     elif cmd == "cost":
         est = estimate_tokens(agent.messages)
+        loop_info = ""
+        if agent.loop_guard:
+            lg = agent.loop_guard.stats()
+            loop_info = (
+                f"; loop_events={lg['loop_events']}, "
+                f"escalations={lg['escalations_used']}, "
+                f"no_progress={lg['no_progress_steps']}"
+            )
         print(f"~{est} tokens in context / num_ctx={agent.num_ctx}; "
-              f"steps={agent.steps}; messages={len(agent.messages)}")
+              f"steps={agent.steps}; messages={len(agent.messages)}{loop_info}")
+    elif cmd in ("loop", "loop-stats"):
+        if not agent.loop_guard:
+            print("Loop guard is disabled.")
+        else:
+            import json
+            print(json.dumps(agent.loop_guard.stats(), indent=2))
+            if agent.loop_guard.loop_events:
+                print("Recent events:")
+                for ev in agent.loop_guard.loop_events[-5:]:
+                    print(f"  step {ev['step']}: {ev['signal']} (level {ev['level']})")
     elif cmd == "resume":
         if not arg:
             sessions = Session.list_all()
@@ -171,7 +256,12 @@ def interactive_loop(agent: Agent, ctx: ToolContext, session: Session):
         except KeyboardInterrupt:
             print("\n\033[33m[interrupted — returning to prompt]\033[0m")
         try:
-            session.save(agent.messages, meta={"model": agent.model})
+            meta = {"model": agent.model, "provider": agent.provider}
+            if agent.loop_guard:
+                meta.update(agent.loop_guard.meta())
+            if agent.quality_gate:
+                meta.update(agent.quality_gate.meta())
+            session.save(agent.messages, meta=meta)
         except Exception:
             pass
 
@@ -199,14 +289,19 @@ def scripted_mock():
 # --------------------------------------------------------------------------- cli
 
 def parse_args(argv=None):
+    cloud_choices = list(CLOUD_PROVIDER_NAMES) + ["ollama"]
     p = argparse.ArgumentParser(
         prog="swe_agent",
-        description="Ollama-powered software-engineering coding agent.",
+        description="Software-engineering coding agent (cloud or local Ollama).",
     )
     p.add_argument("task", nargs="?", default=None,
                    help="Task to perform. Omit for interactive mode.")
-    p.add_argument("--model", "-m", default=DEFAULT_MODEL, help="Ollama model")
-    p.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE, help="Ollama base URL (native API)")
+    p.add_argument("--provider", "-p", default=DEFAULT_PROVIDER,
+                   choices=cloud_choices,
+                   help=f"LLM backend (default: {DEFAULT_PROVIDER})")
+    p.add_argument("--model", "-m", default=None, help="Model name (provider default if omitted)")
+    p.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE,
+                   help="API base URL (provider default for cloud)")
     p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="Context window tokens")
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument("--max-steps", type=int, default=MAX_STEPS)
@@ -219,13 +314,19 @@ def parse_args(argv=None):
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="Resume the most recent session")
     p.add_argument("--list-sessions", action="store_true", help="List saved sessions and exit")
-    p.add_argument("--dry-run", action="store_true", help="Run a scripted mock loop (no Ollama)")
-    p.add_argument("--no-preflight", action="store_true", help="Skip the Ollama server/model check")
-    return p.parse_args(argv)
+    p.add_argument("--dry-run", action="store_true", help="Run a scripted mock loop (no LLM)")
+    p.add_argument("--no-preflight", action="store_true", help="Skip provider/API key check")
+    p.add_argument("--no-loop-guard", action="store_true", help="Disable runtime loop detection")
+    p.add_argument("--no-quality-gate", action="store_true", help="Disable verify-before-complete gate")
+    p.add_argument("--no-intent-gate", action="store_true", help="Disable explore-before-mutate gate")
+    args = p.parse_args(argv)
+    if args.model is None:
+        args.model = DEFAULT_OLLAMA_MODEL
+    args.api_key = ""
+    return args
 
 
 def main(argv=None):
-    # Force UTF-8 output so glyphs/ANSI don't crash on Windows' cp1252 console.
     for _stream in (sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -233,6 +334,7 @@ def main(argv=None):
             pass
 
     args = parse_args(argv)
+    resolve_runtime_config(args)
 
     if args.list_sessions:
         sessions = Session.list_all()
@@ -247,16 +349,31 @@ def main(argv=None):
     mock = None
     if args.dry_run:
         mock = scripted_mock()
-        if not (args.plan):
-            approval = ApprovalMode.YOLO  # avoid prompts in the scripted run
+        if not args.plan:
+            approval = ApprovalMode.YOLO
 
     if not mock and not args.no_preflight:
-        ok, msg = llm.check_server(args.base_url, args.model)
-        if not ok:
-            print(f"\033[31m{msg}\033[0m")
-            return 1
+        if is_cloud_provider(args.provider):
+            ok, msg = check_cloud_provider(args.provider)
+            if not ok:
+                print(f"\033[31m{msg}\033[0m")
+                return 1
+            if msg != "ok":
+                print(f"\033[2m{msg}\033[0m")
+        else:
+            resolved, msg = llm.resolve_model(args.base_url, args.model)
+            if not resolved:
+                print(f"\033[31m{msg}\033[0m")
+                return 1
+            if resolved != args.model:
+                print(f"\033[33m{msg}\033[0m")
+                args.model = resolved
+            elif msg != "ok":
+                print(f"\033[2m{msg}\033[0m")
+            mem_hint = llm.low_memory_hint()
+            if mem_hint:
+                print(f"\033[33m{mem_hint}\033[0m")
 
-    # Resolve / create the session.
     session = None
     resume_msgs = None
     if args.resume:
@@ -273,24 +390,34 @@ def main(argv=None):
     if session is None:
         session = Session.create()
 
-    agent, ctx = build_agent(args, approval, mock=mock)
+    args.loop_guard = LOOP_GUARD_ENABLED and not args.no_loop_guard
+    args.quality_gate = QUALITY_GATE_ENABLED and not args.no_quality_gate
+    args.intent_gate = INTENT_GATE_ENABLED and not args.no_intent_gate
+    agent, ctx = build_agent(args, approval, mock=mock, original_task=args.task or "")
     if resume_msgs:
         prior = [m for m in resume_msgs if m.get("role") != "system"]
         agent.messages += prior
         print(f"Resumed {len(prior)} prior messages.")
 
-    print(f"\033[2mmodel={agent.model} approval={approval.value} num_ctx={agent.num_ctx} "
-          f"cwd={ctx.cwd} session={session.sid}\033[0m")
+    print(f"\033[2mprovider={agent.provider} model={agent.model} approval={approval.value} "
+          f"num_ctx={agent.num_ctx} cwd={ctx.cwd} session={session.sid}\033[0m")
 
     try:
         if args.task:
             agent.add_user(args.task)
             try:
-                agent.run_turn()
+                result = agent.run_turn()
+                if result:
+                    print(f"\n\033[1mresult>\033[0m {result}")
             except KeyboardInterrupt:
                 print("\n\033[33m[interrupted]\033[0m")
             try:
-                session.save(agent.messages, meta={"model": agent.model})
+                meta = {"model": agent.model, "provider": agent.provider}
+                if agent.loop_guard:
+                    meta.update(agent.loop_guard.meta())
+                if agent.quality_gate:
+                    meta.update(agent.quality_gate.meta())
+                session.save(agent.messages, meta=meta)
             except Exception:
                 pass
         else:

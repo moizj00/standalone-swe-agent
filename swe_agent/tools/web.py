@@ -15,9 +15,8 @@ from typing import Optional
 import requests
 
 from ..config import WEB_FETCH_MAX_CHARS
+from ._net import DEFAULT_HEADERS as _HEADERS, ip_is_blocked, safe_get, ssrf_check  # noqa: F401
 from .base import ToolContext, ToolSpec, register
-
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; swe-agent/2.0; +local)"}
 _SKIP_TAGS = {"script", "style", "noscript", "head", "nav", "header", "footer", "svg", "form"}
 _BLOCK_TAGS = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article"}
 
@@ -61,9 +60,16 @@ def html_to_text(markup: str) -> str:
     return parser.text()
 
 
+# SSRF guard now lives in ._net (shared with the custom HTTP tool executor). These
+# backward-compatible aliases keep the historical web._ssrf_check / _ip_is_blocked names.
+_ip_is_blocked = ip_is_blocked
+_ssrf_check = ssrf_check
+_safe_get = safe_get
+
+
 def web_fetch(ctx: ToolContext, url: str) -> str:
     try:
-        r = requests.get(url, timeout=20, headers=_HEADERS, allow_redirects=True)
+        r = safe_get(url)
         r.raise_for_status()
     except Exception as e:
         return f"Error fetching {url}: {e}"

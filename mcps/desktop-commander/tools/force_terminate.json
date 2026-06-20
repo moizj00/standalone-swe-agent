@@ -1,0 +1,17 @@
+{
+  "name": "force_terminate",
+  "description": "\n                        Force terminate a running terminal session.\n                        \n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pid": {
+        "type": "number"
+      }
+    },
+    "required": [
+      "pid"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

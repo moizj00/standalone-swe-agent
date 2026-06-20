@@ -6,7 +6,7 @@
 set -euo pipefail
 
 OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-LOG_FILE="${HOME}/.ollama/server.log"
+LOG_FILE="${OLLAMA_LOG_FILE:-/tmp/swe-agent-ollama-server.log}"
 
 ensure_ollama() {
   if curl -s --max-time 2 "${OLLAMA_URL}/api/tags" > /dev/null 2>&1; then

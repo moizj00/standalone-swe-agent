@@ -1,0 +1,17 @@
+{
+  "name": "kill_process",
+  "description": "\n                        Terminate a running process by PID.\n\n                        Use with caution as this will forcefully terminate the specified process.\n\n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pid": {
+        "type": "number"
+      }
+    },
+    "required": [
+      "pid"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

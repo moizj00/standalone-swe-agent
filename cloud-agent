@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# cloud-agent — launcher for cloud-backed SWE coding agent
+#
+# Usage:
+#   cloud-agent "refactor the config loader"
+#   cloud-agent --provider minimax "add type hints"
+#   cloud-agent --provider kimi --model kimi-k2.7-code "fix the tests"
+#   cloud-agent --provider nemotron "your task"
+#
+# Providers: minimax | kimi | nemotron | openai
+# Default provider: nemotron (override with SWE_AGENT_PROVIDER or --provider)
+# Nemotron uses dummy-key when NVIDIA_API_KEY is unset (401 until you set a real key).
+
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
+
+PROVIDER="${SWE_AGENT_PROVIDER:-nemotron}"
+
+exec python3 "$PYTHON_AGENT" --provider "$PROVIDER" "$@"

@@ -9,6 +9,7 @@ The native endpoint accepts options.num_ctx, streams tool calls, and honors keep
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -17,8 +18,9 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from .config import (BACKOFF_BASE, CONNECT_TIMEOUT, DEFAULT_NUM_CTX, DEFAULT_TEMPERATURE,
-                     DEFAULT_TOP_P, KEEP_ALIVE, MAX_RETRIES, READ_TIMEOUT)
+from .config import (BACKOFF_BASE, CONNECT_TIMEOUT, DEFAULT_NUM_CTX, DEFAULT_MODEL,
+                     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, KEEP_ALIVE, MAX_RETRIES,
+                     MODEL_PREFERENCES, READ_TIMEOUT)
 
 _session = requests.Session()
 
@@ -109,8 +111,20 @@ def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], st
             found.append({"id": f"inline_{uuid.uuid4().hex[:8]}", "name": name,
                           "arguments": args if isinstance(args, dict) else {}})
 
+    # A fenced ```json {...}``` object is matched BOTH by the fence regex above and by
+    # the bare-object scan, so the same call would otherwise be returned (and dispatched)
+    # twice. Dedupe by (name, arguments) -- duplicate identical calls are never intended
+    # and re-running a non-idempotent tool (commit, shell, delete) twice is harmful.
+    deduped, seen = [], set()
+    for c in found:
+        key = (c["name"], json.dumps(c["arguments"], sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+
     cleaned = re.sub(r"```(?:json|tool_call|tool)?\s*\{.*?\}\s*```", "", content, flags=re.S).strip()
-    return found, cleaned
+    return deduped, cleaned
 
 
 # --------------------------------------------------------------------------- transport
@@ -154,8 +168,18 @@ def chat(messages: List[dict], model: str, tools: List[dict], *,
          base_url: str, num_ctx: int = DEFAULT_NUM_CTX,
          temperature: float = DEFAULT_TEMPERATURE, stream: bool = True,
          on_token: Optional[Callable[[str], None]] = None,
-         use_tools: bool = True) -> Tuple[str, List[dict]]:
+         use_tools: bool = True, provider: str = "ollama",
+         api_key: str = "") -> Tuple[str, List[dict]]:
     """Call the model once. Returns (content, raw_tool_calls). Retries transient errors."""
+    from .providers import OpenAICompatibleProvider, is_cloud_provider
+
+    if is_cloud_provider(provider):
+        cloud = OpenAICompatibleProvider(model=model, base_url=base_url, api_key=api_key)
+        return cloud.chat(
+            messages, tools, temperature=temperature, stream=stream,
+            on_token=on_token, use_tools=use_tools,
+        )
+
     url = base_url.rstrip("/") + "/api/chat"
     payload = {
         "model": model,
@@ -183,18 +207,110 @@ def normalize(raw_tool_calls: List[dict]) -> List[dict]:
     return _normalize_tool_calls(raw_tool_calls)
 
 
-def check_server(base_url: str, model: str) -> Tuple[bool, str]:
-    """Pre-flight: is the server up and is the model pulled?"""
+def list_models(base_url: str) -> List[str]:
+    """Return model tags reported by the Ollama server (empty if unreachable)."""
     try:
         r = _session.get(base_url.rstrip("/") + "/api/tags", timeout=5)
         r.raise_for_status()
-        names = [m.get("name", "") for m in r.json().get("models", [])]
-    except Exception as e:
-        return False, (f"Ollama server is not reachable at {base_url} ({e}).\n"
-                       f"Start it with 'ollama serve'.")
-    # Ollama tags often include a :latest suffix; match loosely.
-    base = model.split(":")[0]
-    if model in names or any(n.split(":")[0] == base for n in names):
-        return True, "ok"
-    return False, (f"Model '{model}' is not pulled. Available: {', '.join(names) or '(none)'}.\n"
-                   f"Pull it with 'ollama pull {model}'.")
+        return [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+    except Exception:
+        return []
+
+
+def _model_base(name: str) -> str:
+    """Strip the tag suffix for loose matching (qwen2.5-coder:7b -> qwen2.5-coder)."""
+    return name.rsplit(":", 1)[0] if ":" in name else name
+
+
+def model_available(model: str, available: List[str]) -> bool:
+    """True when *model* is present in Ollama's tag list (loose tag/base matching)."""
+    if not model or not available:
+        return False
+    base = _model_base(model)
+    return model in available or any(_model_base(n) == base for n in available)
+
+
+def _exact_model_name(model: str, available: List[str]) -> Optional[str]:
+    """Return the concrete tag Ollama reports for a requested/base model name."""
+    if model in available:
+        return model
+    base = _model_base(model)
+    for name in available:
+        if _model_base(name) == base:
+            return name
+    return None
+
+
+def resolve_model(base_url: str, requested: str) -> Tuple[Optional[str], str]:
+    """Pick a usable model tag. Returns (model_or_none, message)."""
+    available = list_models(base_url)
+    if not available:
+        return None, (f"Ollama server is not reachable at {base_url}.\n"
+                      f"Start it with 'ollama serve'.")
+
+    exact = _exact_model_name(requested, available)
+    if exact:
+        return exact, "ok"
+
+    # Honor an explicit user override even when it is missing — do not silently swap.
+    if os.environ.get("OLLAMA_AGENT_MODEL"):
+        return None, (
+            f"Model '{requested}' is not pulled (OLLAMA_AGENT_MODEL is set).\n"
+            f"Available: {', '.join(available)}.\n"
+            f"Pull it with: ollama pull {requested}"
+        )
+
+    candidates = []
+    seen = set()
+    for name in [requested, *MODEL_PREFERENCES, *available]:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        candidates.append(name)
+
+    for candidate in candidates:
+        resolved = _exact_model_name(candidate, available)
+        if resolved:
+            if candidate != requested and _model_base(candidate) != _model_base(requested):
+                return resolved, (
+                    f"Model '{requested}' is not pulled; using '{resolved}' instead.\n"
+                    f"For best coding + tool use, run: ollama pull {DEFAULT_MODEL}"
+                )
+            return resolved, (
+                f"Model '{requested}' is not pulled; using '{resolved}' instead.\n"
+                f"Pull the recommended coder model: ollama pull {DEFAULT_MODEL}"
+            )
+
+    return None, (
+        f"No usable model found. Requested '{requested}'.\n"
+        f"Available: {', '.join(available)}.\n"
+        f"Recommended: ollama pull {DEFAULT_MODEL}"
+    )
+
+
+def check_server(base_url: str, model: str) -> Tuple[bool, str]:
+    """Pre-flight: is the server up and is the model pulled?"""
+    resolved, msg = resolve_model(base_url, model)
+    if resolved:
+        return True, msg
+    return False, msg
+
+
+def low_memory_hint() -> Optional[str]:
+    """Return a user-facing warning when the host looks RAM-starved for a 7B model."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            info = {}
+            for line in f:
+                key, _, rest = line.partition(":")
+                info[key.strip()] = int(rest.strip().split()[0])  # kB
+        available_kb = info.get("MemAvailable", info.get("MemFree", 0))
+        if available_kb and available_kb < 1_500_000:  # < ~1.5 GiB free
+            return (
+                f"Low available RAM (~{available_kb // 1024} MiB). "
+                "First model responses can take several minutes on CPU. "
+                "Close other apps, set OLLAMA_NUM_CTX=4096, or use a smaller model."
+            )
+    except OSError:
+        pass
+    return None
