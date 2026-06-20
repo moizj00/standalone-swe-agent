@@ -60,6 +60,141 @@ async function startServer() {
     });
   });
 
+  // -- Conversations (database backend) -----------------------------------------------
+  // POST /api/conversations - Create a new conversation
+  app.post('/api/conversations', async (req, res) => {
+    try {
+      const { userId, title } = req.body;
+      if (!userId || !title) {
+        return res.status(400).json({ error: 'Missing userId or title' });
+      }
+
+      const { db } = await import('./src/lib/db');
+      const { generateId } = await import('./src/lib/utils');
+      const { conversation } = await import('./src/lib/db/schema');
+
+      const id = generateId();
+      const now = new Date();
+      
+      const result = await db.insert(conversation).values({
+        id,
+        userId,
+        title,
+        createdAt: now,
+        updatedAt: now,
+      }).returning();
+
+      res.status(201).json(result[0]);
+    } catch (error: any) {
+      console.error('Error creating conversation:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/conversations - List user's conversations
+  app.get('/api/conversations', async (req, res) => {
+    try {
+      const userId = req.query.userId as string;
+      if (!userId) {
+        return res.status(400).json({ error: 'Missing userId' });
+      }
+
+      const { db } = await import('./src/lib/db');
+      const { conversation } = await import('./src/lib/db/schema');
+      const { eq, desc } = await import('drizzle-orm');
+
+      const results = await db
+        .select()
+        .from(conversation)
+        .where(eq(conversation.userId, userId))
+        .orderBy(desc(conversation.updatedAt));
+
+      res.json(results);
+    } catch (error: any) {
+      console.error('Error fetching conversations:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/conversations/:conversationId/messages - Add message
+  app.post('/api/conversations/:conversationId/messages', async (req, res) => {
+    try {
+      const { conversationId } = req.params;
+      const { userId, role, content, toolCalls } = req.body;
+
+      if (!userId || !role || !content) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      const { db } = await import('./src/lib/db');
+      const { generateId } = await import('./src/lib/utils');
+      const { message, conversation } = await import('./src/lib/db/schema');
+      const { eq } = await import('drizzle-orm');
+
+      // Verify user owns the conversation
+      const conv = await db.select().from(conversation).where(eq(conversation.id, conversationId));
+      if (!conv.length || conv[0].userId !== userId) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
+      const id = generateId();
+      const now = new Date();
+
+      const result = await db.insert(message).values({
+        id,
+        conversationId,
+        userId,
+        role,
+        content,
+        toolCalls: toolCalls ? JSON.stringify(toolCalls) : null,
+        createdAt: now,
+      }).returning();
+
+      // Update conversation updatedAt
+      await db.update(conversation)
+        .set({ updatedAt: now })
+        .where(eq(conversation.id, conversationId));
+
+      res.status(201).json(result[0]);
+    } catch (error: any) {
+      console.error('Error adding message:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/conversations/:conversationId/messages - Get messages
+  app.get('/api/conversations/:conversationId/messages', async (req, res) => {
+    try {
+      const { conversationId } = req.params;
+      const userId = req.query.userId as string;
+
+      if (!userId) {
+        return res.status(400).json({ error: 'Missing userId' });
+      }
+
+      const { db } = await import('./src/lib/db');
+      const { message, conversation } = await import('./src/lib/db/schema');
+      const { eq } = await import('drizzle-orm');
+
+      // Verify user owns the conversation
+      const conv = await db.select().from(conversation).where(eq(conversation.id, conversationId));
+      if (!conv.length || conv[0].userId !== userId) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
+      const results = await db
+        .select()
+        .from(message)
+        .where(eq(message.conversationId, conversationId))
+        .orderBy(message.createdAt);
+
+      res.json(results);
+    } catch (error: any) {
+      console.error('Error fetching messages:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // -- VS Code workspace integration (unchanged) ----------------------------
   const fs = await import('fs/promises');
 
