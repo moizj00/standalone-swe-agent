@@ -1,26 +1,45 @@
-"""LLM transport: native Ollama /api/chat with streaming, num_ctx, retries, and a
-robust fallback parser for small models that emit tool calls as inline JSON.
+"""LLM transport dispatcher.
 
-We deliberately use the NATIVE endpoint (not the OpenAI-compatible /v1) because:
-  - /v1 cannot set num_ctx (context silently caps at Ollama's ~4K default), and
-  - /v1 has buggy streaming-with-tools.
-The native endpoint accepts options.num_ctx, streams tool calls, and honors keep_alive.
+The agent treats every model through a small surface — ``chat()``, ``normalize()``,
+``extract_inline_tool_calls()``, ``check_server()`` — and this module routes the
+calls to the right backend by inspecting the model name. ``claude-*`` goes to the
+Anthropic Messages API; everything else stays on the Ollama-native /api/chat path
+the original code was built around.
+
+The Ollama and Anthropic transports live in ``swe_agent/_ollama.py`` and
+``swe_agent/_anthropic.py`` respectively. Both speak the same in/out contract:
+
+    chat(messages, model, tools, *, base_url, num_ctx, temperature, stream,
+         on_token, use_tools) -> (content_str, raw_tool_calls_list_of_dict)
+
+Returned ``raw_tool_calls`` are in the Ollama-native shape
+(``[{function: {name, arguments}}, ...]``) so the existing ``normalize()`` works
+unchanged whichever backend is in use.
+
+Shared utilities — ``normalize`` and ``extract_inline_tool_calls`` — are backend
+agnostic; they live here so both transports (and tests) import them from one place.
 """
 from __future__ import annotations
 
 import json
-import random
 import re
-import time
 import uuid
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import List, Tuple
 
-import requests
+from . import _anthropic, _ollama
 
-from .config import (BACKOFF_BASE, CONNECT_TIMEOUT, DEFAULT_NUM_CTX, DEFAULT_TEMPERATURE,
-                     DEFAULT_TOP_P, KEEP_ALIVE, MAX_RETRIES, READ_TIMEOUT)
 
-_session = requests.Session()
+# --------------------------------------------------------------------------- backend selection
+
+def _backend_for(model: str):
+    """Pick the transport for ``model``. Override with ``SWE_AGENT_BACKEND``."""
+    import os
+    forced = (os.environ.get("SWE_AGENT_BACKEND") or "").strip().lower()
+    if forced == "anthropic":
+        return _anthropic
+    if forced == "ollama":
+        return _ollama
+    return _anthropic if (model or "").startswith("claude-") else _ollama
 
 
 # --------------------------------------------------------------------------- normalization
@@ -74,11 +93,7 @@ def _scan_json_objects(text: str) -> List[str]:
 
 
 def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], str]:
-    """Recover tool calls a small model put inside its text. Returns (calls, cleaned_content).
-
-    Only payloads whose name matches a registered tool are accepted, so prose that
-    merely mentions JSON does not misfire.
-    """
+    """Recover tool calls a small model put inside its text. Returns (calls, cleaned_content)."""
     if not content:
         return [], content
     candidates = []
@@ -109,10 +124,6 @@ def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], st
             found.append({"id": f"inline_{uuid.uuid4().hex[:8]}", "name": name,
                           "arguments": args if isinstance(args, dict) else {}})
 
-    # A fenced ```json {...}``` object is matched BOTH by the fence regex above and by
-    # the bare-object scan, so the same call would otherwise be returned (and dispatched)
-    # twice. Dedupe by (name, arguments) -- duplicate identical calls are never intended
-    # and re-running a non-idempotent tool (commit, shell, delete) twice is harmful.
     deduped, seen = [], set()
     for c in found:
         key = (c["name"], json.dumps(c["arguments"], sort_keys=True, default=str))
@@ -125,88 +136,15 @@ def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], st
     return deduped, cleaned
 
 
-# --------------------------------------------------------------------------- transport
-
-def _do_request(url: str, payload: dict, on_token: Optional[Callable[[str], None]]) -> Tuple[str, List[dict]]:
-    content_parts: List[str] = []
-    tool_calls: List[dict] = []
-    with _session.post(url, json=payload, stream=payload.get("stream", False),
-                       timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as r:
-        r.raise_for_status()
-        if payload.get("stream"):
-            for line in r.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                msg = chunk.get("message") or {}
-                piece = msg.get("content")
-                if piece:
-                    content_parts.append(piece)
-                    if on_token:
-                        on_token(piece)
-                for tc in msg.get("tool_calls") or []:
-                    tool_calls.append(tc)
-                if chunk.get("done"):
-                    break
-        else:
-            data = r.json()
-            msg = data.get("message") or {}
-            content_parts.append(msg.get("content") or "")
-            tool_calls = msg.get("tool_calls") or []
-    return "".join(content_parts), tool_calls
-
-
-_RETRYABLE = (requests.ConnectionError, requests.Timeout, requests.HTTPError)
-
-
-def chat(messages: List[dict], model: str, tools: List[dict], *,
-         base_url: str, num_ctx: int = DEFAULT_NUM_CTX,
-         temperature: float = DEFAULT_TEMPERATURE, stream: bool = True,
-         on_token: Optional[Callable[[str], None]] = None,
-         use_tools: bool = True) -> Tuple[str, List[dict]]:
-    """Call the model once. Returns (content, raw_tool_calls). Retries transient errors."""
-    url = base_url.rstrip("/") + "/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "keep_alive": KEEP_ALIVE,
-        "options": {"num_ctx": num_ctx, "temperature": temperature, "top_p": DEFAULT_TOP_P},
-    }
-    if use_tools and tools:
-        payload["tools"] = tools
-
-    last_err = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            return _do_request(url, payload, on_token)
-        except _RETRYABLE as e:
-            last_err = e
-            if attempt == MAX_RETRIES - 1:
-                break
-            time.sleep(BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.3))
-    raise RuntimeError(f"Ollama request failed after {MAX_RETRIES} attempts: {last_err}")
-
-
 def normalize(raw_tool_calls: List[dict]) -> List[dict]:
     return _normalize_tool_calls(raw_tool_calls)
 
 
+# --------------------------------------------------------------------------- dispatch
+
+def chat(messages, model, tools, **kw):
+    return _backend_for(model).chat(messages, model, tools, **kw)
+
+
 def check_server(base_url: str, model: str) -> Tuple[bool, str]:
-    """Pre-flight: is the server up and is the model pulled?"""
-    try:
-        r = _session.get(base_url.rstrip("/") + "/api/tags", timeout=5)
-        r.raise_for_status()
-        names = [m.get("name", "") for m in r.json().get("models", [])]
-    except Exception as e:
-        return False, (f"Ollama server is not reachable at {base_url} ({e}).\n"
-                       f"Start it with 'ollama serve'.")
-    # Ollama tags often include a :latest suffix; match loosely.
-    base = model.split(":")[0]
-    if model in names or any(n.split(":")[0] == base for n in names):
-        return True, "ok"
-    return False, (f"Model '{model}' is not pulled. Available: {', '.join(names) or '(none)'}.\n"
-                   f"Pull it with 'ollama pull {model}'.")
+    return _backend_for(model).check_server(base_url, model)
