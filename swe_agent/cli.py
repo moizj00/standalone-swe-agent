@@ -14,10 +14,12 @@ from .audit import AuditLog
 from .config import (AUDIT_ENABLED, ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX,
                      DEFAULT_OLLAMA_BASE, DEFAULT_OLLAMA_MODEL, DEFAULT_PROVIDER,
                      DEFAULT_TEMPERATURE, INTENT_GATE_ENABLED, LOOP_GUARD_ENABLED,
-                     MAX_STEPS, QUALITY_GATE_ENABLED, REDACT_ENABLED)
+                     MAX_STEPS, QUALITY_GATE_ENABLED, REDACT_ENABLED, RALPH_STATE_FILE)
 from .intent_gate import IntentGate
 from .loop_guard import LoopGuard, make_cloud_escalate_cb
 from .project_config import ProjectConfig, load_project_config, merge_into_args
+from .autopilot import run_autopilot
+from .ralph import run_ralph
 from .providers import CLOUD_PROVIDER_NAMES, check_cloud_provider, get_provider, is_cloud_provider
 from .quality_gate import QualityGate
 from .session import (Session, build_env_context, estimate_tokens, load_project_instructions)
@@ -41,6 +43,8 @@ HELP_TEXT = """Commands:
   /cost              show context size / step stats
   /loop              show loop-guard detector state (alias: /loop-stats)
   /loop-stats        show loop-guard detector state
+  /ralph <prompt>    Ralph loop: re-run a task each pass until done [--max-iterations N --completion-promise TEXT]
+  /cancel-ralph      cancel an active Ralph loop
   /exit              quit"""
 
 
@@ -166,6 +170,31 @@ def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""
 
 # --------------------------------------------------------------------------- slash commands
 
+def _parse_ralph_args(arg: str):
+    """Parse '<prompt words> [--max-iterations N] [--completion-promise TEXT]' from /ralph."""
+    import shlex
+    try:
+        tokens = shlex.split(arg)
+    except ValueError:
+        tokens = arg.split()
+    max_it, promise, parts, i = 0, None, [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--max-iterations" and i + 1 < len(tokens):
+            try:
+                max_it = int(tokens[i + 1])
+            except ValueError:
+                max_it = 0
+            i += 2
+        elif t == "--completion-promise" and i + 1 < len(tokens):
+            promise = tokens[i + 1]
+            i += 2
+        else:
+            parts.append(t)
+            i += 1
+    return " ".join(parts), max_it, promise
+
+
 def handle_slash(agent: Agent, ctx: ToolContext, line: str):
     parts = line.strip().split(maxsplit=1)
     cmd = parts[0][1:].lower()
@@ -221,6 +250,22 @@ def handle_slash(agent: Agent, ctx: ToolContext, line: str):
             )
         print(f"~{est} tokens in context / num_ctx={agent.num_ctx}; "
               f"steps={agent.steps}; messages={len(agent.messages)}{loop_info}")
+    elif cmd == "ralph":
+        if not arg:
+            print("Usage: /ralph <prompt> [--max-iterations N] [--completion-promise TEXT]")
+        else:
+            prompt, max_it, promise = _parse_ralph_args(arg)
+            if not prompt:
+                print("Ralph needs a task prompt.")
+            else:
+                run_ralph(agent, prompt, max_iterations=max_it, completion_promise=promise)
+    elif cmd == "cancel-ralph":
+        sf = ctx.cwd / RALPH_STATE_FILE
+        if sf.exists():
+            sf.unlink()
+            print("Cancelled Ralph loop.")
+        else:
+            print("No active Ralph loop.")
     elif cmd in ("loop", "loop-stats"):
         if not agent.loop_guard:
             print("Loop guard is disabled.")
@@ -344,6 +389,20 @@ def parse_args(argv=None):
     p.add_argument("--auto-branch", action="store_true",
                    help="Auto-create agent/<slug>-<timestamp> branch for one-shot tasks")
     p.add_argument("--no-audit", action="store_true", help="Disable audit log (.agent/audit.log)")
+    # Ralph loop mode
+    p.add_argument("--ralph", action="store_true",
+                   help="Ralph loop: re-feed the SAME task each iteration until a completion promise or limit")
+    p.add_argument("--max-iterations", type=int, default=0,
+                   help="Ralph: max outer-loop iterations (0 = unlimited, capped by RALPH_HARD_CAP)")
+    p.add_argument("--completion-promise", default=None,
+                   help="Ralph: phrase that, inside <promise>...</promise>, ends the loop")
+    # Autopilot mode
+    p.add_argument("--autopilot", action="store_true",
+                   help="Autopilot: edit a fresh branch, run the tests, and repair until green (do not combine with --auto-branch)")
+    p.add_argument("--max-repairs", type=int, default=3,
+                   help="Autopilot: max repair attempts after the first edit (default 3)")
+    p.add_argument("--test-command", default=None,
+                   help="Autopilot: test command to run (shell-split); auto-detected if omitted")
     # Subcommands that bypass agent loop
     p.add_argument("--diff", action="store_true", help="Show pending uncommitted changes and exit")
     p.add_argument("--apply", action="store_true", help="Stage and commit all pending changes, then exit")
@@ -469,13 +528,30 @@ def main(argv=None):
 
     try:
         if args.task:
-            agent.add_user(args.task)
             try:
-                result = agent.run_turn()
-                if json_mode:
-                    _emit_json_report(ctx.cwd, result, session.sid)
-                elif result:
-                    print(f"\n\033[1mresult>\033[0m {result}")
+                if getattr(args, "autopilot", False):
+                    import shlex
+                    cmd = shlex.split(args.test_command) if args.test_command else None
+                    res = run_autopilot(agent, args.task, repo_path=str(ctx.cwd),
+                                        max_repairs=args.max_repairs, test_command=cmd)
+                    print(f"\n\033[1mautopilot>\033[0m {res.summary}")
+                    print(f"  run_id={res.run_id} branch={res.branch} commit={res.commit} "
+                          f"success={res.success} attempts={res.attempts}")
+                    result = res.summary
+                elif getattr(args, "ralph", False):
+                    result = run_ralph(
+                        agent, args.task,
+                        max_iterations=args.max_iterations,
+                        completion_promise=args.completion_promise,
+                    )
+                else:
+                    agent.add_user(args.task)
+                    result = agent.run_turn()
+                if result and not getattr(args, "autopilot", False):
+                    if json_mode:
+                        _emit_json_report(ctx.cwd, result, session.sid)
+                    else:
+                        print(f"\n\033[1mresult>\033[0m {result}")
             except KeyboardInterrupt:
                 if not json_mode:
                     print("\n\033[33m[interrupted]\033[0m")
