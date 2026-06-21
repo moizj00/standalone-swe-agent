@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ralph-agent — run the SWE coding agent in Ralph mode (many self-restarting passes).
+#
+# Ralph mode runs the agent repeatedly against the same task, accumulating
+# progress across passes until a completion condition is met. Because it makes
+# MANY model calls, it defaults to the cheap local Ollama provider.
+#
+# Usage:
+#   ralph-agent --max-iterations 10 --completion-promise "all tests pass" "make tests pass"
+#   ralph-agent "refactor the queue until it is clean"
+#
+# --max-iterations and --completion-promise (and any other args) are forwarded
+# straight to the Python --ralph loop.
+#
+# Env:
+#   SWE_AGENT_PROVIDER   provider to use   (default: ollama — cheap, local)
+#   OLLAMA_AGENT_MODEL   local model       (default: qwen2.5-coder:7b)
+
+set -euo pipefail
+
+# Resolve the real location even if invoked via symlink (e.g. ~/.local/bin/ralph-agent)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
+ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
+
+PROVIDER="${SWE_AGENT_PROVIDER:-ollama}"
+MODEL="${OLLAMA_AGENT_MODEL:-qwen2.5-coder:7b}"
+
+if [[ "$PROVIDER" == "ollama" ]]; then
+  # Ensure the Ollama server is up (idempotent) before the long Ralph loop.
+  [[ -x "$ENSURE_SCRIPT" ]] && "$ENSURE_SCRIPT" >/dev/null 2>&1 || true
+  exec python3 "$PYTHON_AGENT" --provider ollama --model "$MODEL" --ralph "$@"
+else
+  exec python3 "$PYTHON_AGENT" --provider "$PROVIDER" --ralph "$@"
+fi
