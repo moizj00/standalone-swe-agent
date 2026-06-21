@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..project_config import load_project_config
 from .base import ToolContext, ToolSpec, register
 from .exec import run_command
 
@@ -11,6 +12,12 @@ def run_tests(ctx: ToolContext, cwd: Optional[str] = None, command: Optional[str
     workdir = ctx.resolve(cwd) if cwd else ctx.cwd
     if command:
         return run_command(ctx, command, cwd=str(workdir), description="run tests (override)")
+
+    # Check project config for a configured test command
+    project_cfg = load_project_config(workdir)
+    if project_cfg.test_command:
+        return run_command(ctx, project_cfg.test_command, cwd=str(workdir),
+                           description="run tests (project config)")
 
     if (workdir / "package.json").exists():
         cmd, desc = "npm test", "npm test"

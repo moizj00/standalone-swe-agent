@@ -8,12 +8,20 @@ from __future__ import annotations
 import shutil
 from typing import Optional
 
+from ..project_config import load_project_config
 from .base import ToolContext, ToolSpec, register
 from .exec import run_command
 
 
 def run_linter(ctx: ToolContext, cwd: Optional[str] = None) -> str:
     workdir = ctx.resolve(cwd) if cwd else ctx.cwd
+
+    # Check project config for a configured lint command
+    project_cfg = load_project_config(workdir)
+    if project_cfg.lint_command:
+        return run_command(ctx, project_cfg.lint_command, cwd=str(workdir),
+                           description="lint (project config)")
+
     if (workdir / "package.json").exists() and shutil.which("npx"):
         return run_command(ctx, "npx --no-install eslint .", cwd=str(workdir), description="eslint")
     if shutil.which("ruff"):
@@ -28,6 +36,13 @@ def run_linter(ctx: ToolContext, cwd: Optional[str] = None) -> str:
 
 def run_type_checker(ctx: ToolContext, cwd: Optional[str] = None) -> str:
     workdir = ctx.resolve(cwd) if cwd else ctx.cwd
+
+    # Check project config for a configured type check command
+    project_cfg = load_project_config(workdir)
+    if project_cfg.type_check_command:
+        return run_command(ctx, project_cfg.type_check_command, cwd=str(workdir),
+                           description="typecheck (project config)")
+
     if (workdir / "tsconfig.json").exists() and shutil.which("npx"):
         return run_command(ctx, "npx --no-install tsc --noEmit", cwd=str(workdir), description="tsc --noEmit")
     if shutil.which("mypy"):

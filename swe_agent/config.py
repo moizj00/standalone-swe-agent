@@ -75,6 +75,13 @@ INTENT_GATE_ENABLED = os.environ.get("INTENT_GATE_ENABLED", "true").lower() in (
 INTENT_SCOPE_READ_WINDOW = int(os.environ.get("INTENT_SCOPE_READ_WINDOW", "10"))
 INTENT_SCOPE_BLOCK_AFTER = int(os.environ.get("INTENT_SCOPE_BLOCK_AFTER", "2"))
 
+# ----- Audit log ------------------------------------------------------------
+AUDIT_ENABLED = os.environ.get("SWE_AGENT_AUDIT", "true").lower() in ("1", "true", "yes")
+
+# ----- Secret redaction -----------------------------------------------------
+REDACT_ENABLED = os.environ.get("SWE_AGENT_REDACT", "true").lower() in ("1", "true", "yes")
+REDACT_ENTROPY = os.environ.get("SWE_AGENT_REDACT_ENTROPY", "true").lower() in ("1", "true", "yes")
+
 # ----- Storage --------------------------------------------------------------
 SESSION_DIR = Path(
     os.environ.get("SWE_AGENT_HOME", str(Path.home() / ".swe_agent"))

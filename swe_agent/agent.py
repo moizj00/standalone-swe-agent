@@ -10,15 +10,17 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from . import llm, prompts
-from .config import (ApprovalMode, COMPACT_KEEP_RECENT, COMPACT_THRESHOLD,
+from .audit import AuditLog, Timer
+from .config import (AUDIT_ENABLED, ApprovalMode, COMPACT_KEEP_RECENT, COMPACT_THRESHOLD,
                      DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE, DEFAULT_PROVIDER,
                      DEFAULT_TEMPERATURE, INTENT_GATE_ENABLED, LOOP_GUARD_ENABLED,
                      MAX_OBSERVATION_CHARS, MAX_STEPS, QUALITY_GATE_ENABLED,
-                     SUBAGENT_MAX_STEPS)
+                     REDACT_ENABLED, REDACT_ENTROPY, SUBAGENT_MAX_STEPS)
 from .providers import is_cloud_provider
 from .intent_gate import IntentGate
 from .loop_guard import LoopGuard, make_cloud_escalate_cb
 from .quality_gate import QualityGate
+from .redact import redact as redact_secrets
 from .session import estimate_tokens
 from .tools import ADVERTISED, TOOLS, VALID_NAMES, resolve_spec
 from .tools.base import ToolContext
@@ -37,7 +39,10 @@ class Agent:
                  loop_guard: Optional[LoopGuard] = None,
                  quality_gate: Optional[QualityGate] = None,
                  intent_gate: Optional[IntentGate] = None,
-                 original_task: str = ""):
+                 original_task: str = "",
+                 audit_log: Optional[AuditLog] = None,
+                 redact: bool = REDACT_ENABLED,
+                 json_mode: bool = False):
         self.model = model
         self.provider = provider
         self.api_key = api_key
@@ -61,6 +66,9 @@ class Agent:
         self.messages: List[dict] = [{"role": "system", "content": system_prompt}]
         self.steps = 0
         self._prefix_printed = False
+        self.audit_log = audit_log or AuditLog(ctx.cwd, enabled=AUDIT_ENABLED)
+        self.redact = redact
+        self.json_mode = json_mode
         if loop_guard is None and LOOP_GUARD_ENABLED:
             yolo = getattr(ctx.approval, "value", str(ctx.approval)) == "yolo"
             loop_guard = LoopGuard(
@@ -286,6 +294,10 @@ class Agent:
         if not allowed:
             if self.verbose:
                 print(f"  \033[33m⊘ {block}\033[0m")
+            self.audit_log.record(
+                step=step or self.steps, tool_name=name, args=args,
+                result="", duration_ms=0, approved=False, blocked_reason=block,
+            )
             return block
 
         if name == "task_complete" and self.quality_gate:
@@ -299,18 +311,29 @@ class Agent:
                 )
                 return rejection
 
-        try:
-            result = spec.impl(self.ctx, **args)
-        except TypeError as e:
-            result = f"Tool '{name}' argument error: {e}"
-        except Exception as e:
-            result = f"Tool '{name}' raised: {e}"
+        with Timer() as timer:
+            try:
+                result = spec.impl(self.ctx, **args)
+            except TypeError as e:
+                result = f"Tool '{name}' argument error: {e}"
+            except Exception as e:
+                result = f"Tool '{name}' raised: {e}"
 
         result = str(result)
         if len(result) > MAX_OBSERVATION_CHARS:
             result = result[:MAX_OBSERVATION_CHARS] + "\n... (observation truncated)"
+
+        # Redact secrets from tool output before feeding back to the model
+        if self.redact:
+            result = redact_secrets(result, check_entropy=REDACT_ENTROPY)
+
         if self.verbose:
             print(textwrap.indent(result[:1500], "   "))
+
+        self.audit_log.record(
+            step=step or self.steps, tool_name=name, args=args,
+            result=result, duration_ms=timer.elapsed_ms, approved=True,
+        )
 
         if self.loop_guard:
             self.loop_guard.record(
