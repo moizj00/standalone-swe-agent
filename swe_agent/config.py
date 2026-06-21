@@ -32,6 +32,14 @@ MAX_STEPS = int(os.environ.get("SWE_AGENT_MAX_STEPS", "50"))
 SUBAGENT_MAX_STEPS = int(os.environ.get("SWE_AGENT_SUBAGENT_MAX_STEPS", "20"))
 SUBAGENT_MAX_WORKERS = int(os.environ.get("SWE_AGENT_SUBAGENT_WORKERS", "50"))
 
+# ----- Ralph loop -----------------------------------------------------------
+# "Ralph is a bash loop": re-feed the SAME task each pass until a completion
+# promise is emitted or the cap is hit. RALPH_HARD_CAP is the runaway safety net
+# when --max-iterations is 0/unlimited; the state file makes a run observable and
+# cancellable (delete it to stop at the next iteration boundary).
+RALPH_HARD_CAP = int(os.environ.get("RALPH_HARD_CAP", "50"))
+RALPH_STATE_FILE = os.environ.get("RALPH_STATE_FILE", ".swe_agent/ralph-loop.local.md")
+
 # ----- Timeouts / retries ---------------------------------------------------
 TOOL_TIMEOUT = int(os.environ.get("SWE_AGENT_TOOL_TIMEOUT", "120"))  # shell command default (s)
 CONNECT_TIMEOUT = 10

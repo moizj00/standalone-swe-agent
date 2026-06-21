@@ -1,0 +1,9 @@
+{
+  "name": "ralph-wiggum",
+  "version": "1.0.0",
+  "description": "Ralph Wiggum loop for Claude Code: re-feed the SAME prompt every iteration via a Stop hook until a completion promise is detected or a max-iteration limit is hit. A self-referential, in-session iterative development loop. Adapted from Anthropic's official ralph-loop plugin (Apache-2.0).",
+  "author": {
+    "name": "Moiz Jamil",
+    "note": "Adapted from Anthropic's official ralph-loop plugin (Apache-2.0). See LICENSE and README attribution."
+  }
+}
