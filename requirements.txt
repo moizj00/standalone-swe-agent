@@ -1,1 +1,2 @@
 requests>=2.31.0
+GitPython>=3.1.40  # swe_agent.patcher: branch + commit LLM patches
