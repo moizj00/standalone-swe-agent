@@ -41,6 +41,8 @@ HELP_TEXT = """Commands:
   /cost              show context size / step stats
   /loop              show loop-guard detector state (alias: /loop-stats)
   /loop-stats        show loop-guard detector state
+  /ralph <prompt>    Ralph loop: re-run a task each pass until done [--max-iterations N --completion-promise TEXT]
+  /cancel-ralph      cancel an active Ralph loop
   /exit              quit"""
 
 
@@ -166,6 +168,31 @@ def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""
 
 # --------------------------------------------------------------------------- slash commands
 
+def _parse_ralph_args(arg: str):
+    """Parse '<prompt words> [--max-iterations N] [--completion-promise TEXT]' from /ralph."""
+    import shlex
+    try:
+        tokens = shlex.split(arg)
+    except ValueError:
+        tokens = arg.split()
+    max_it, promise, parts, i = 0, None, [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--max-iterations" and i + 1 < len(tokens):
+            try:
+                max_it = int(tokens[i + 1])
+            except ValueError:
+                max_it = 0
+            i += 2
+        elif t == "--completion-promise" and i + 1 < len(tokens):
+            promise = tokens[i + 1]
+            i += 2
+        else:
+            parts.append(t)
+            i += 1
+    return " ".join(parts), max_it, promise
+
+
 def handle_slash(agent: Agent, ctx: ToolContext, line: str):
     parts = line.strip().split(maxsplit=1)
     cmd = parts[0][1:].lower()
@@ -221,6 +248,22 @@ def handle_slash(agent: Agent, ctx: ToolContext, line: str):
             )
         print(f"~{est} tokens in context / num_ctx={agent.num_ctx}; "
               f"steps={agent.steps}; messages={len(agent.messages)}{loop_info}")
+    elif cmd == "ralph":
+        if not arg:
+            print("Usage: /ralph <prompt> [--max-iterations N] [--completion-promise TEXT]")
+        else:
+            prompt, max_it, promise = _parse_ralph_args(arg)
+            if not prompt:
+                print("Ralph needs a task prompt.")
+            else:
+                run_ralph(agent, prompt, max_iterations=max_it, completion_promise=promise)
+    elif cmd == "cancel-ralph":
+        sf = ctx.cwd / RALPH_STATE_FILE
+        if sf.exists():
+            sf.unlink()
+            print("Cancelled Ralph loop.")
+        else:
+            print("No active Ralph loop.")
     elif cmd in ("loop", "loop-stats"):
         if not agent.loop_guard:
             print("Loop guard is disabled.")
@@ -469,7 +512,6 @@ def main(argv=None):
 
     try:
         if args.task:
-            agent.add_user(args.task)
             try:
                 result = agent.run_turn()
                 if json_mode:

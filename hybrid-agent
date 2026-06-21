@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# hybrid-agent — cloud-first launcher that warms a local Ollama model in the background.
+#
+# Runs the cloud-backed agent immediately (low latency, high quality) while a
+# local Ollama model is pulled + warmed in a detached background subshell, so a
+# subsequent `--local` fallback (or a manual ollama call) is fast. The warmup
+# NEVER blocks the foreground cloud agent.
+#
+# Usage:
+#   hybrid-agent "explore the project and add type hints"
+#   hybrid-agent --local "fix the failing tests"          # run the local Ollama agent instead
+#   hybrid-agent --provider openai "refactor the loader"  # pick the cloud provider
+#
+# Flags this launcher owns/peeks:
+#   --local      run the local Ollama agent (ollama-agent) and skip the cloud path entirely (consumed)
+#   --dry-run    peeked: skips the live Ollama warmup, but is still forwarded to the agent
+#
+# Env:
+#   OLLAMA_AGENT_MODEL   local model to warm   (default: qwen2.5-coder:7b)
+#   SWE_AGENT_PROVIDER   cloud provider label  (default: nemotron; overridden by --provider/-p)
+
+set -euo pipefail
+
+# Resolve the real location even if invoked via symlink (e.g. ~/.local/bin/hybrid-agent)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
+CLOUD_AGENT="$AGENT_DIR/cloud-agent"
+OLLAMA_AGENT="$AGENT_DIR/ollama-agent"
+ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
+
+# Parse args: own --local (consume), peek --dry-run (forward), forward the rest unchanged.
+LOCAL=0
+DRY_RUN=0
+PROVIDER_OVERRIDE=""
+FORWARD=()
+expect_provider=0
+for arg in "$@"; do
+  if [[ "$expect_provider" == "1" ]]; then
+    PROVIDER_OVERRIDE="$arg"
+    expect_provider=0
+    FORWARD+=("$arg")
+    continue
+  fi
+  case "$arg" in
+    --local)
+      LOCAL=1
+      ;;  # consumed; not forwarded
+    --dry-run)
+      DRY_RUN=1
+      FORWARD+=("$arg")  # peeked but still forwarded
+      ;;
+    --provider|-p)
+      expect_provider=1
+      FORWARD+=("$arg")
+      ;;
+    --provider=*)
+      PROVIDER_OVERRIDE="${arg#--provider=}"
+      FORWARD+=("$arg")
+      ;;
+    *)
+      FORWARD+=("$arg")
+      ;;
+  esac
+done
+
+# --local: hand off to the local Ollama agent and let its own preflight report issues.
+if [[ "$LOCAL" == "1" ]]; then
+  exec "$OLLAMA_AGENT" ${FORWARD[@]+"${FORWARD[@]}"}
+fi
+
+# Cloud-first mode.
+LOCAL_MODEL="${OLLAMA_AGENT_MODEL:-qwen2.5-coder:7b}"
+PROVIDER="${SWE_AGENT_PROVIDER:-nemotron}"
+if [[ -n "$PROVIDER_OVERRIDE" ]]; then
+  PROVIDER="$PROVIDER_OVERRIDE"
+fi
+WARMUP_LOG="/tmp/swe-agent-hybrid-warmup.log"
+
+# Background warmup subshell — must never block the foreground cloud agent.
+(
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "dry-run: skipping live Ollama warmup for $LOCAL_MODEL"
+    exit 0
+  fi
+  if [[ -x "$ENSURE_SCRIPT" ]]; then
+    "$ENSURE_SCRIPT" || true
+  fi
+  if command -v ollama >/dev/null 2>&1; then
+    ollama pull "$LOCAL_MODEL" || true
+    ollama run "$LOCAL_MODEL" "warmup: reply ok" || true
+  else
+    echo "ollama not found on PATH — skipping warmup for $LOCAL_MODEL"
+  fi
+) > "$WARMUP_LOG" 2>&1 &
+WARMUP_PID=$!
+disown || true
+
+echo "hybrid-agent: cloud provider=$PROVIDER | warming local model=$LOCAL_MODEL (pid $WARMUP_PID, log $WARMUP_LOG)" >&2
+
+# Run the cloud-backed agent in the foreground.
+exec "$CLOUD_AGENT" ${FORWARD[@]+"${FORWARD[@]}"}

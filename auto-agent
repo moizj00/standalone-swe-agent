@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# auto-agent — run the SWE agent in AUTOPILOT mode: edit a fresh branch, run the
+# project's tests, and repair until green (or the repair cap). Every run gets a
+# unique run_id (also the branch name), so each autonomous run is traceable.
+#
+# Usage:
+#   ./auto-agent "make the failing tests pass"
+#   ./auto-agent --max-repairs 5 --test-command "python -m pytest -q" "fix the parser"
+#   SWE_AGENT_PROVIDER=nemotron ./auto-agent "task"     # use a cloud provider
+#
+# Defaults to local Ollama (repair loops run several passes). All flags after the
+# script name are forwarded to swe_agent.py --autopilot. Runs with --auto so edits
+# are auto-accepted (autopilot is non-interactive).
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+PYTHON_AGENT="$AGENT_DIR/swe_agent.py"
+ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
+
+PROVIDER="${SWE_AGENT_PROVIDER:-ollama}"
+MODEL="${OLLAMA_AGENT_MODEL:-qwen2.5-coder:7b}"
+
+if [[ "$PROVIDER" == "ollama" ]]; then
+  [[ -x "$ENSURE_SCRIPT" ]] && "$ENSURE_SCRIPT" >/dev/null 2>&1 || true
+  exec python3 "$PYTHON_AGENT" --provider ollama --model "$MODEL" --auto --autopilot "$@"
+fi
+exec python3 "$PYTHON_AGENT" --provider "$PROVIDER" --auto --autopilot "$@"
