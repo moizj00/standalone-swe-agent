@@ -110,14 +110,14 @@ def _join(results, context_lines: int) -> str:
 
 register(ToolSpec(
     name="grep",
-    description="Search file contents with a regular expression (ripgrep-backed). "
-                "Supports a file glob filter, case-insensitivity, and context lines. Respects .gitignore.",
+    description="Search file contents with a regular expression (ripgrep-backed). Read-only; respects .gitignore. "
+                "Use to find where code lives across the repo. Narrow results with the glob filter and add context_lines to see surrounding code.",
     parameters={"type": "object", "properties": {
-        "pattern": {"type": "string", "description": "Regex pattern"},
-        "path": {"type": "string", "description": "Directory or file (default '.')"},
-        "glob": {"type": "string", "description": "File glob filter, e.g. '*.py'"},
-        "context_lines": {"type": "integer", "description": "Lines of context before/after each match", "default": 0},
-        "ignore_case": {"type": "boolean", "default": False},
+        "pattern": {"type": "string", "description": "Regex pattern to search for, e.g. 'def \\w+' to find Python function definitions"},
+        "path": {"type": "string", "description": "Directory or file to search (default '.')"},
+        "glob": {"type": "string", "description": "File glob filter to limit which files are searched, e.g. '*.py'"},
+        "context_lines": {"type": "integer", "description": "Lines of context to show before/after each match", "default": 0},
+        "ignore_case": {"type": "boolean", "description": "Case-insensitive matching when true", "default": False},
     }, "required": ["pattern"]},
     impl=grep, category="read",
 ))

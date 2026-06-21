@@ -8,12 +8,20 @@ from __future__ import annotations
 import shutil
 from typing import Optional
 
+from ..project_config import load_project_config
 from .base import ToolContext, ToolSpec, register
 from .exec import run_command
 
 
 def run_linter(ctx: ToolContext, cwd: Optional[str] = None) -> str:
     workdir = ctx.resolve(cwd) if cwd else ctx.cwd
+
+    # Check project config for a configured lint command
+    project_cfg = load_project_config(workdir)
+    if project_cfg.lint_command:
+        return run_command(ctx, project_cfg.lint_command, cwd=str(workdir),
+                           description="lint (project config)")
+
     if (workdir / "package.json").exists() and shutil.which("npx"):
         return run_command(ctx, "npx --no-install eslint .", cwd=str(workdir), description="eslint")
     if shutil.which("ruff"):
@@ -28,6 +36,13 @@ def run_linter(ctx: ToolContext, cwd: Optional[str] = None) -> str:
 
 def run_type_checker(ctx: ToolContext, cwd: Optional[str] = None) -> str:
     workdir = ctx.resolve(cwd) if cwd else ctx.cwd
+
+    # Check project config for a configured type check command
+    project_cfg = load_project_config(workdir)
+    if project_cfg.type_check_command:
+        return run_command(ctx, project_cfg.type_check_command, cwd=str(workdir),
+                           description="typecheck (project config)")
+
     if (workdir / "tsconfig.json").exists() and shutil.which("npx"):
         return run_command(ctx, "npx --no-install tsc --noEmit", cwd=str(workdir), description="tsc --noEmit")
     if shutil.which("mypy"):
@@ -40,14 +55,16 @@ def run_type_checker(ctx: ToolContext, cwd: Optional[str] = None) -> str:
 
 register(ToolSpec(
     name="run_linter",
-    description="Auto-detect and run the project's linter (eslint for JS/TS; ruff/flake8/pylint for Python).",
-    parameters={"type": "object", "properties": {"cwd": {"type": "string"}}, "required": []},
+    description="Auto-detect and run the project's linter (eslint for JS/TS; ruff/flake8/pylint for Python) to surface "
+                "style and lint errors. Read-only; use after edits to catch issues before finishing.",
+    parameters={"type": "object", "properties": {"cwd": {"type": "string", "description": "Directory to lint (default: agent cwd)"}}, "required": []},
     impl=run_linter, category="exec",
 ))
 
 register(ToolSpec(
     name="run_type_checker",
-    description="Auto-detect and run the project's type checker (tsc for TS; mypy/pyright for Python).",
-    parameters={"type": "object", "properties": {"cwd": {"type": "string"}}, "required": []},
+    description="Auto-detect and run the project's type checker (tsc for TS; mypy/pyright for Python) to surface type "
+                "errors. Read-only; use after edits to verify types still check out.",
+    parameters={"type": "object", "properties": {"cwd": {"type": "string", "description": "Directory to type-check (default: agent cwd)"}}, "required": []},
     impl=run_type_checker, category="exec",
 ))

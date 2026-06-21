@@ -114,37 +114,37 @@ def apply_patch(ctx: ToolContext, patch: str, path: Optional[str] = None) -> str
 
 register(ToolSpec(
     name="git_status",
-    description="Show git status (branch + staged/unstaged/untracked files).",
+    description="Show git status: current branch plus staged, unstaged, and untracked files. Read-only. Use to see what has changed before staging or committing.",
     parameters={"type": "object", "properties": {"cwd": {"type": "string"}}, "required": []},
     impl=git_status, category="read",
 ))
 
 register(ToolSpec(
     name="git_diff",
-    description="Show git diff. Set staged=true for staged changes; optional path to limit to one file.",
+    description="Show the git diff of working-tree changes. Read-only. Set staged=true to diff staged changes instead; pass path to limit to one file.",
     parameters={"type": "object", "properties": {
         "cwd": {"type": "string"},
         "staged": {"type": "boolean", "default": False},
-        "path": {"type": "string"},
+        "path": {"type": "string", "description": "Limit the diff to one file, e.g. 'src/app.py'"},
     }, "required": []},
     impl=git_diff, category="read",
 ))
 
 register(ToolSpec(
     name="git_log",
-    description="Show recent git commits (one line each).",
+    description="Show recent git commits, one line each (hash + subject). Read-only. Use to review recent history.",
     parameters={"type": "object", "properties": {
         "cwd": {"type": "string"},
-        "max_count": {"type": "integer", "default": 10},
+        "max_count": {"type": "integer", "description": "Number of recent commits to show", "default": 10},
     }, "required": []},
     impl=git_log, category="read",
 ))
 
 register(ToolSpec(
     name="git_show",
-    description="Show a commit's message, author, and diff (defaults to HEAD).",
+    description="Show one commit's message, author, and full diff. Read-only. Use to inspect a specific commit; defaults to HEAD.",
     parameters={"type": "object", "properties": {
-        "ref": {"type": "string", "description": "Commit ref (default: HEAD)"},
+        "ref": {"type": "string", "description": "Commit ref to show, e.g. 'HEAD' or a commit hash (default: HEAD)"},
         "cwd": {"type": "string"},
     }, "required": []},
     impl=git_show, category="read",
@@ -152,9 +152,9 @@ register(ToolSpec(
 
 register(ToolSpec(
     name="git_commit",
-    description="Stage all changes and commit with a message.",
+    description="Stage all changes (git add -A) and create a commit with the given message. SAFETY: this writes a commit to git history; use only when the user asks to commit.",
     parameters={"type": "object", "properties": {
-        "message": {"type": "string"},
+        "message": {"type": "string", "description": "Commit message, e.g. 'Fix off-by-one in pagination'"},
         "cwd": {"type": "string"},
     }, "required": ["message"]},
     impl=git_commit, mutating=True, category="write",
@@ -162,10 +162,10 @@ register(ToolSpec(
 
 register(ToolSpec(
     name="apply_patch",
-    description="Apply a unified diff / git-style patch (via git apply, falling back to patch -p1).",
+    description="Apply a unified diff / git-style patch to files (via git apply, falling back to patch -p1). SAFETY: this mutates files on disk and is not auto-reversible. For small edits to a known file, prefer edit/multi_edit; use this for multi-file or hunk-based patches.",
     parameters={"type": "object", "properties": {
-        "patch": {"type": "string", "description": "The unified diff content"},
-        "path": {"type": "string", "description": "Directory to apply in (default: agent cwd)"},
+        "patch": {"type": "string", "description": "Unified diff text, e.g. starting with '--- a/file.py' / '+++ b/file.py' and '@@' hunks"},
+        "path": {"type": "string", "description": "Directory to apply the patch in (default: agent cwd)"},
     }, "required": ["patch"]},
     impl=apply_patch, mutating=True, category="write",
 ))

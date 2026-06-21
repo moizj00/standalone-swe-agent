@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from . import llm, prompts
 from .agent import Agent
-from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
-                     DEFAULT_OLLAMA_MODEL, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE,
-                     INTENT_GATE_ENABLED, LOOP_GUARD_ENABLED, MAX_STEPS, QUALITY_GATE_ENABLED,
-                     RALPH_STATE_FILE)
+from .audit import AuditLog
+from .config import (AUDIT_ENABLED, ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX,
+                     DEFAULT_OLLAMA_BASE, DEFAULT_OLLAMA_MODEL, DEFAULT_PROVIDER,
+                     DEFAULT_TEMPERATURE, INTENT_GATE_ENABLED, LOOP_GUARD_ENABLED,
+                     MAX_STEPS, QUALITY_GATE_ENABLED, REDACT_ENABLED)
 from .intent_gate import IntentGate
 from .loop_guard import LoopGuard, make_cloud_escalate_cb
-from .autopilot import run_autopilot
-from .ralph import run_ralph
+from .project_config import ProjectConfig, load_project_config, merge_into_args
 from .providers import CLOUD_PROVIDER_NAMES, check_cloud_provider, get_provider, is_cloud_provider
 from .quality_gate import QualityGate
 from .session import (Session, build_env_context, estimate_tokens, load_project_instructions)
@@ -105,6 +108,11 @@ def resolve_runtime_config(args) -> None:
 
 def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""):
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+
+    # Load project config (.agent/config.yaml)
+    project_cfg = load_project_config(cwd)
+    merge_into_args(args, project_cfg)
+
     env = build_env_context(cwd)
     proj, proj_path = load_project_instructions(cwd)
     system = prompts.build_system_prompt(
@@ -113,6 +121,7 @@ def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""
         provider=args.provider,
     )
     state = {"always_tools": set(), "always_prefixes": set()}
+    json_mode = getattr(args, "json_mode", False)
     ctx = ToolContext(
         cwd=cwd, approval=approval, approve_cb=make_approval_cb(state),
         bg_registry=BackgroundRegistry(), model=args.model, base_url=args.base_url,
@@ -123,31 +132,38 @@ def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""
         loop_guard = LoopGuard(
             enabled=True,
             original_task=original_task,
-            verbose=True,
+            verbose=not json_mode,
             yolo=(approval == ApprovalMode.YOLO),
             cloud_escalate_cb=make_cloud_escalate_cb(),
         )
     else:
         loop_guard = LoopGuard(enabled=False)
     if getattr(args, "quality_gate", QUALITY_GATE_ENABLED):
-        quality_gate = QualityGate(enabled=True, verbose=True)
+        quality_gate = QualityGate(enabled=True, verbose=not json_mode)
     else:
         quality_gate = QualityGate(enabled=False)
     if getattr(args, "intent_gate", INTENT_GATE_ENABLED):
-        intent_gate = IntentGate(enabled=True, original_task=original_task, verbose=True)
+        intent_gate = IntentGate(enabled=True, original_task=original_task, verbose=not json_mode)
     else:
         intent_gate = IntentGate(enabled=False)
+
+    audit_log = AuditLog(cwd, enabled=AUDIT_ENABLED and not getattr(args, "no_audit", False))
+
     agent = Agent(
-        model=args.model, ctx=ctx, system_prompt=system, stream=not args.no_stream,
-        verbose=True, max_steps=args.max_steps, base_url=args.base_url,
+        model=args.model, ctx=ctx, system_prompt=system,
+        stream=not args.no_stream and not json_mode,
+        verbose=not json_mode, max_steps=args.max_steps, base_url=args.base_url,
         num_ctx=args.num_ctx, temperature=args.temperature, mock=mock,
         provider=args.provider, api_key=args.api_key,
         loop_guard=loop_guard, quality_gate=quality_gate, intent_gate=intent_gate,
-        original_task=original_task,
+        original_task=original_task, audit_log=audit_log,
+        redact=REDACT_ENABLED, json_mode=json_mode,
     )
-    if proj_path:
+    if proj_path and not json_mode:
         print(f"\033[2mLoaded project instructions from {proj_path}\033[0m")
-    return agent, ctx
+    if project_cfg._source and not json_mode:
+        print(f"\033[2mLoaded project config from {project_cfg._source}\033[0m")
+    return agent, ctx, project_cfg
 
 
 # --------------------------------------------------------------------------- slash commands
@@ -365,22 +381,33 @@ def parse_args(argv=None):
     p.add_argument("--no-loop-guard", action="store_true", help="Disable runtime loop detection")
     p.add_argument("--no-quality-gate", action="store_true", help="Disable verify-before-complete gate")
     p.add_argument("--no-intent-gate", action="store_true", help="Disable explore-before-mutate gate")
-    p.add_argument("--ralph", action="store_true",
-                   help="Ralph loop: re-feed the SAME task each iteration until a completion promise or limit")
-    p.add_argument("--max-iterations", type=int, default=0,
-                   help="Ralph: max outer-loop iterations (0 = unlimited, capped by RALPH_HARD_CAP)")
-    p.add_argument("--completion-promise", default=None,
-                   help="Ralph: phrase that, inside <promise>...</promise>, ends the loop")
-    p.add_argument("--autopilot", action="store_true",
-                   help="Autopilot: edit a fresh branch, run the tests, and repair until green")
-    p.add_argument("--max-repairs", type=int, default=3,
-                   help="Autopilot: max repair attempts after the first edit (default 3)")
-    p.add_argument("--test-command", default=None,
-                   help="Autopilot: test command to run (shell-split); auto-detected if omitted")
+    # New flags from the spec
+    p.add_argument("--json", dest="json_mode", action="store_true",
+                   help="Headless/CI mode: suppress ANSI, output structured JSON report")
+    p.add_argument("--auto-branch", action="store_true",
+                   help="Auto-create agent/<slug>-<timestamp> branch for one-shot tasks")
+    p.add_argument("--no-audit", action="store_true", help="Disable audit log (.agent/audit.log)")
+    # Subcommands that bypass agent loop
+    p.add_argument("--diff", action="store_true", help="Show pending uncommitted changes and exit")
+    p.add_argument("--apply", action="store_true", help="Stage and commit all pending changes, then exit")
+    p.add_argument("--revert", action="store_true", help="Discard all uncommitted changes, then exit")
+    p.add_argument("--test", action="store_true", dest="run_test",
+                   help="Run configured test command and exit")
+    p.add_argument("--config-get", metavar="KEY", default=None,
+                   help="Read a value from .agent/config.yaml")
+    p.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), default=None,
+                   help="Set a value in .agent/config.yaml")
+    p.add_argument("--export", metavar="SESSION_ID", default=None,
+                   help="Export a session transcript to JSON and exit")
     args = p.parse_args(argv)
     if args.model is None:
         args.model = DEFAULT_OLLAMA_MODEL
     args.api_key = ""
+    # Track which args are still at defaults (for project config merging)
+    args._model_defaulted = args.model == DEFAULT_OLLAMA_MODEL
+    args._provider_defaulted = args.provider == DEFAULT_PROVIDER
+    args._temp_defaulted = args.temperature == DEFAULT_TEMPERATURE
+    args._steps_defaulted = args.max_steps == MAX_STEPS
     return args
 
 
@@ -393,6 +420,22 @@ def main(argv=None):
 
     args = parse_args(argv)
     resolve_runtime_config(args)
+
+    # Subcommand dispatch (these exit early without spinning up an agent)
+    if args.diff:
+        return cmd_diff(args)
+    if args.apply:
+        return cmd_apply(args)
+    if args.revert:
+        return cmd_revert(args)
+    if args.run_test:
+        return cmd_test(args)
+    if args.config_get:
+        return cmd_config_get(args)
+    if args.config_set:
+        return cmd_config_set(args)
+    if args.export:
+        return cmd_export(args)
 
     if args.list_sessions:
         sessions = Session.list_all()
@@ -451,40 +494,33 @@ def main(argv=None):
     args.loop_guard = LOOP_GUARD_ENABLED and not args.no_loop_guard
     args.quality_gate = QUALITY_GATE_ENABLED and not args.no_quality_gate
     args.intent_gate = INTENT_GATE_ENABLED and not args.no_intent_gate
-    agent, ctx = build_agent(args, approval, mock=mock, original_task=args.task or "")
+    json_mode = getattr(args, "json_mode", False)
+    agent, ctx, project_cfg = build_agent(args, approval, mock=mock, original_task=args.task or "")
     if resume_msgs:
         prior = [m for m in resume_msgs if m.get("role") != "system"]
         agent.messages += prior
-        print(f"Resumed {len(prior)} prior messages.")
+        if not json_mode:
+            print(f"Resumed {len(prior)} prior messages.")
 
-    print(f"\033[2mprovider={agent.provider} model={agent.model} approval={approval.value} "
-          f"num_ctx={agent.num_ctx} cwd={ctx.cwd} session={session.sid}\033[0m")
+    if not json_mode:
+        print(f"\033[2mprovider={agent.provider} model={agent.model} approval={approval.value} "
+              f"num_ctx={agent.num_ctx} cwd={ctx.cwd} session={session.sid}\033[0m")
+
+    # Auto-branch creation for one-shot tasks
+    if args.task and getattr(args, "auto_branch", False):
+        _auto_create_branch(ctx.cwd, args.task)
 
     try:
         if args.task:
             try:
-                if getattr(args, "autopilot", False):
-                    import shlex
-                    cmd = shlex.split(args.test_command) if args.test_command else None
-                    res = run_autopilot(agent, args.task, repo_path=str(ctx.cwd),
-                                        max_repairs=args.max_repairs, test_command=cmd)
-                    print(f"\n\033[1mautopilot>\033[0m {res.summary}")
-                    print(f"  run_id={res.run_id} branch={res.branch} commit={res.commit} "
-                          f"success={res.success} attempts={res.attempts}")
-                    result = res.summary
-                elif getattr(args, "ralph", False):
-                    result = run_ralph(
-                        agent, args.task,
-                        max_iterations=args.max_iterations,
-                        completion_promise=args.completion_promise,
-                    )
-                else:
-                    agent.add_user(args.task)
-                    result = agent.run_turn()
-                if result and not getattr(args, "autopilot", False):
+                result = agent.run_turn()
+                if json_mode:
+                    _emit_json_report(ctx.cwd, result, session.sid)
+                elif result:
                     print(f"\n\033[1mresult>\033[0m {result}")
             except KeyboardInterrupt:
-                print("\n\033[33m[interrupted]\033[0m")
+                if not json_mode:
+                    print("\n\033[33m[interrupted]\033[0m")
             try:
                 meta = {"model": agent.model, "provider": agent.provider}
                 if agent.loop_guard:
@@ -502,6 +538,170 @@ def main(argv=None):
         except Exception:
             pass
     return 0
+
+
+# --------------------------------------------------------------------------- subcommands
+
+def _git_run(cwd: Path, args: list) -> str:
+    """Run a git command and return stdout."""
+    try:
+        res = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=30)
+        return (res.stdout or "").strip() + (("\n" + res.stderr.strip()) if res.returncode else "")
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _resolve_cwd(args) -> Path:
+    return Path(args.cwd).resolve() if args.cwd else Path.cwd()
+
+
+def cmd_diff(args) -> int:
+    """Show uncommitted changes (git diff + git diff --staged)."""
+    cwd = _resolve_cwd(args)
+    staged = _git_run(cwd, ["diff", "--staged"])
+    unstaged = _git_run(cwd, ["diff"])
+    if staged:
+        print("=== Staged ===")
+        print(staged)
+    if unstaged:
+        print("=== Unstaged ===")
+        print(unstaged)
+    if not staged and not unstaged:
+        print("No pending changes.")
+    return 0
+
+
+def cmd_apply(args) -> int:
+    """Stage and commit all pending changes."""
+    cwd = _resolve_cwd(args)
+    out = _git_run(cwd, ["add", "-A"])
+    if "Error" in out:
+        print(out)
+        return 1
+    out = _git_run(cwd, ["commit", "-m", "agent: apply pending changes"])
+    print(out)
+    return 0 if "Error" not in out else 1
+
+
+def cmd_revert(args) -> int:
+    """Discard all uncommitted changes."""
+    cwd = _resolve_cwd(args)
+    _git_run(cwd, ["checkout", "--", "."])
+    # Also clean untracked files
+    _git_run(cwd, ["clean", "-fd"])
+    print("All uncommitted changes reverted.")
+    return 0
+
+
+def cmd_test(args) -> int:
+    """Run configured test command."""
+    cwd = _resolve_cwd(args)
+    project_cfg = load_project_config(cwd)
+    cmd = project_cfg.test_command
+    if not cmd:
+        # Auto-detect
+        if (cwd / "package.json").exists():
+            cmd = "npm test"
+        elif any((cwd / f).exists() for f in ("pyproject.toml", "pytest.ini", "setup.py")):
+            cmd = "python -m pytest -q"
+        elif (cwd / "Cargo.toml").exists():
+            cmd = "cargo test"
+        elif (cwd / "go.mod").exists():
+            cmd = "go test ./..."
+        else:
+            cmd = "python -m pytest -q"
+    print(f"Running: {cmd}")
+    try:
+        res = subprocess.run(cmd, shell=True, cwd=str(cwd))
+        return res.returncode
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+
+
+def cmd_config_get(args) -> int:
+    """Read a value from .agent/config.yaml."""
+    cwd = _resolve_cwd(args)
+    project_cfg = load_project_config(cwd)
+    key = args.config_get
+    val = getattr(project_cfg, key, None)
+    if val is None:
+        print(f"{key}: (not set)")
+    else:
+        print(f"{key}: {val}")
+    return 0
+
+
+def cmd_config_set(args) -> int:
+    """Set a value in .agent/config.yaml."""
+    cwd = _resolve_cwd(args)
+    key, value = args.config_set
+    config_dir = cwd / ".agent"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+
+    lines = []
+    if config_path.exists():
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+
+    # Simple key: value replacement or append
+    found = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}:"):
+            lines[i] = f"{key}: {value}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key}: {value}")
+
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Set {key} = {value}")
+    return 0
+
+
+def cmd_export(args) -> int:
+    """Export a session transcript to JSON."""
+    session = Session.load(args.export)
+    if not session:
+        print(f"Session '{args.export}' not found.")
+        return 1
+    messages = session.read_messages()
+    print(json.dumps(messages, indent=2, default=str))
+    return 0
+
+
+def _auto_create_branch(cwd: Path, task: str) -> None:
+    """Create and checkout agent/<slug>-<timestamp> branch."""
+    # Generate a slug from the task
+    slug = "".join(c if c.isalnum() else "-" for c in task[:30]).strip("-").lower()
+    slug = slug[:20] or "task"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    branch = f"agent/{slug}-{timestamp}"
+    try:
+        subprocess.run(["git", "checkout", "-b", branch], cwd=str(cwd),
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass  # non-fatal: agent can still work on current branch
+
+
+def _emit_json_report(cwd: Path, result: str, session_id: str) -> None:
+    """In --json mode, print the structured report to stdout."""
+    report_path = cwd / ".agent" / "report.json"
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["session_id"] = session_id
+            print(json.dumps(report, indent=2))
+            return
+        except Exception:
+            pass
+    # Fallback: emit a minimal report
+    print(json.dumps({
+        "status": "success" if result else "failed",
+        "summary": result or "",
+        "session_id": session_id,
+    }, indent=2))
 
 
 if __name__ == "__main__":

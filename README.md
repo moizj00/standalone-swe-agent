@@ -21,7 +21,7 @@ It supports parallel sub-agents with **isolated private context** — subagents 
    ollama serve
    ```
 
-2. Pull the recommended model:
+2. Pull a tool-capable model (the agent defaults to `qwen2.5:7b`):
    ```bash
    ollama pull hhao/qwen2.5-coder-tools:7b
    ```
