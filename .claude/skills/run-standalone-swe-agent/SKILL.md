@@ -1,6 +1,6 @@
 ---
 name: run-standalone-swe-agent
-description: Build, run, smoke-test, and screenshot standalone-swe-agent. Use when asked to start the agent, run its tests, drive the CLI, exercise the HTTP/SSE server, launch or screenshot the web dashboard, or verify changes end-to-end.
+description: Build, run, smoke-test, screenshot, or Cloud Run-deploy standalone-swe-agent. Use when asked to start the agent, run its tests, drive the CLI, exercise the HTTP/SSE server, launch or screenshot the web dashboard, verify changes end-to-end, build the Docker image, or deploy to GCP Cloud Run.
 ---
 
 `standalone-swe-agent` is three surfaces in one repo:
@@ -100,6 +100,27 @@ cd web && npm run dev   # → http://localhost:3000 → "Coding Mode"
 ```
 
 Both are useless headless without Ollama; use the smoke driver to verify everything else.
+
+## Run (Cloud Run)
+
+The repo is set up to deploy as a single container that serves both the React dashboard and the agent (using **Anthropic Claude** as the LLM, since Ollama can't run serverlessly). Full operator docs: `cloudrun/README.md`.
+
+```bash
+export GCP_PROJECT=your-project
+export ANTHROPIC_API_KEY=sk-ant-...
+bash cloudrun/deploy.sh                 # builds with Cloud Build, deploys with --no-allow-unauthenticated
+```
+
+Local container smoke test (no GCP needed):
+
+```bash
+docker build -t swe-agent .
+docker run --rm -p 8080:8080 -e ANTHROPIC_API_KEY=sk-ant-... -e SWE_AGENT_TRUST_NETWORK=1 swe-agent &
+curl -sf http://127.0.0.1:8080/api/health
+curl -sf http://127.0.0.1:8080/ | head -c 200      # SPA index.html
+```
+
+Backend selection is automatic by model prefix: a `claude-*` model routes to the Anthropic Messages API (`swe_agent/_anthropic.py`); anything else stays on Ollama (`swe_agent/_ollama.py`). Override with `SWE_AGENT_BACKEND=anthropic|ollama`.
 
 ## Gotchas
 

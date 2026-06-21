@@ -1,0 +1,39 @@
+.git/
+.gitignore
+.dockerignore
+.claude/
+
+# Python build artifacts and caches
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Tests don't ship in the runtime image.
+tests/
+pytest.ini
+
+# Local-dev artifacts.
+web/node_modules/
+web/dist/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Repo-specific docs and local helpers that don't belong in the image.
+docs/
+README.md
+ollama-agent
+ensure-ollama.sh
+ollama_data/
+
+# Cloud Run sources stay outside the image (deploy script reads them from the host).
+cloudrun/
+Dockerfile

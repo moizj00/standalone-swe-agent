@@ -241,3 +241,107 @@ def test_auth_wrong_token(srv_token):
     r = requests.post(srv_token + "/api/chat", json=_user("x"),
                       headers={"Authorization": "Bearer nope"}, timeout=10)
     assert r.status_code == 401
+
+
+# ---- static SPA serving --------------------------------------------------
+
+def _write_spa(root):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "index.html").write_text("<!doctype html><html id=\"root\">x</html>")
+    (root / "app.js").write_text("console.log('ok')")
+
+
+@pytest.fixture
+def srv_with_static(tmp_path):
+    static_dir = tmp_path / "dist"
+    _write_spa(static_dir)
+    cfg = ServerConfig(host="127.0.0.1", port=0, cwd=tmp_path, persist=False,
+                       agent_factory=echo_factory, static_dir=static_dir)
+    httpd, base = _start(cfg)
+    yield base
+    httpd.shutdown(); httpd.server_close()
+
+
+def test_static_dir_serves_index_at_root(srv_with_static):
+    r = requests.get(srv_with_static + "/", timeout=10)
+    assert r.status_code == 200
+    assert "id=\"root\"" in r.text
+    assert r.headers.get("Content-Type", "").startswith("text/html")
+
+
+def test_static_dir_serves_known_assets_with_mime(srv_with_static):
+    r = requests.get(srv_with_static + "/app.js", timeout=10)
+    assert r.status_code == 200
+    assert "console.log" in r.text
+    assert "javascript" in r.headers.get("Content-Type", "")
+
+
+def test_static_dir_spa_fallback_on_unknown_route(srv_with_static):
+    # Client-side router routes like /dashboard/coding fall through to index.html.
+    r = requests.get(srv_with_static + "/dashboard/coding", timeout=10)
+    assert r.status_code == 200
+    assert "id=\"root\"" in r.text
+
+
+def test_static_dir_does_not_shadow_api(srv_with_static):
+    r = requests.get(srv_with_static + "/api/health", timeout=10)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+
+
+def test_static_dir_rejects_path_traversal(srv_with_static, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET")
+    r = requests.get(srv_with_static + "/../secret.txt", timeout=10)
+    # The HTTP layer normalizes "..", but even if it didn't, the resolve()-based
+    # containment check inside _try_serve_static would refuse. Expect 404, not 200.
+    assert r.status_code == 404 or "SECRET" not in r.text
+
+
+def test_no_static_dir_still_404s_non_api(srv):
+    r = requests.get(srv + "/", timeout=10)
+    assert r.status_code == 404
+
+
+# ---- safety: trust-network env var --------------------------------------
+
+def test_safety_refusal_blocks_non_loopback_without_token(monkeypatch):
+    monkeypatch.delenv("SWE_AGENT_TRUST_NETWORK", raising=False)
+    from swe_agent.server import _safety_refusal
+    cfg = ServerConfig(host="0.0.0.0", token=None, approval=ApprovalMode.READ_ONLY)
+    assert _safety_refusal(cfg) is not None
+
+
+def test_safety_refusal_allows_non_loopback_with_trust_network(monkeypatch):
+    monkeypatch.setenv("SWE_AGENT_TRUST_NETWORK", "1")
+    from swe_agent.server import _safety_refusal
+    cfg = ServerConfig(host="0.0.0.0", token=None, approval=ApprovalMode.READ_ONLY)
+    assert _safety_refusal(cfg) is None
+
+
+def test_trust_network_does_not_unlock_yolo_without_token(monkeypatch):
+    monkeypatch.setenv("SWE_AGENT_TRUST_NETWORK", "1")
+    from swe_agent.server import _safety_refusal
+    cfg = ServerConfig(host="0.0.0.0", token=None, approval=ApprovalMode.YOLO)
+    refusal = _safety_refusal(cfg)
+    assert refusal is not None
+    assert "yolo" in refusal.lower()
+
+
+# ---- PORT env honored by main() arg parsing -----------------------------
+
+def test_main_parser_honors_PORT_env(monkeypatch):
+    monkeypatch.setenv("PORT", "9090")
+    monkeypatch.delenv("SWE_AGENT_SERVER_PORT", raising=False)
+    # Re-import the parser builder fresh: argparse defaults snapshot env at call time
+    # because the parser is built inside main(), not at module import.
+    from swe_agent.server import main as _server_main
+    import argparse, contextlib, io
+    # Hijack parse_args via no-op serve: pass --no-preflight and bind so port resolves;
+    # easier path: directly read the resolved namespace by intercepting `serve`.
+    captured = {}
+    import swe_agent.server as srvmod
+    monkeypatch.setattr(srvmod, "serve", lambda cfg, **kw: captured.update(port=cfg.port))
+    _server_main(argv=["--host", "127.0.0.1", "--cwd", "/tmp", "--no-preflight"])
+    assert captured["port"] == 9090

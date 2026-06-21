@@ -38,6 +38,7 @@ import argparse
 import copy
 import hmac
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -87,6 +88,10 @@ class ServerConfig:
     approval: ApprovalMode = ApprovalMode.READ_ONLY
     token: Optional[str] = None
     persist: bool = True
+    # Path to a built React/SPA bundle (web/dist) the server should serve for
+    # non-/api/* GETs. None disables static serving (the local-dev default; the
+    # Node proxy in web/server.ts handles it instead).
+    static_dir: Optional[Path] = None
     # Injectable for tests: build an Agent for a session id. Defaults to a real,
     # Ollama-backed agent built from this config.
     agent_factory: Optional[Callable[["ServerConfig", str], Agent]] = None
@@ -402,7 +407,49 @@ class Handler(BaseHTTPRequestHandler):
             # the builder must refuse so a custom tool can't shadow one and 400 the chat.
             return self._send_json({"tools": gemini_tool_declarations(),
                                     "reserved": sorted(VALID_NAMES)})
+        # Non-/api/* GETs fall back to the SPA bundle when one is configured (Cloud
+        # Run / single-container layout). The check is local — no static_dir set,
+        # no static serving, original 404 behavior is preserved for local dev.
+        if self.config.static_dir and not path.startswith("/api/"):
+            served = self._try_serve_static(path)
+            if served:
+                return
         return self._send_json({"error": f"not found: {path}"}, 404)
+
+    # ---- static (SPA) -----------------------------------------------------
+
+    def _try_serve_static(self, path: str) -> bool:
+        """Serve a file from ``static_dir``; SPA-fallback to index.html for unknown paths."""
+        root = self.config.static_dir
+        if not root or not root.is_dir():
+            return False
+        rel = path.lstrip("/") or "index.html"
+        target = (root / rel).resolve()
+        # Reject path traversal: target must remain inside the static root.
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            return False
+        if not target.is_file():
+            # SPA fallback: any unknown route resolves to index.html so client-side
+            # routing works (deep links, dashboard tabs).
+            target = (root / "index.html").resolve()
+            if not target.is_file():
+                return False
+        try:
+            body = target.read_bytes()
+        except OSError:
+            return False
+        mime, _ = mimetypes.guess_type(target.name)
+        self.send_response(200)
+        self.send_header("Content-Type", mime or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        return True
 
     def do_POST(self):
         if not self._authorized():
@@ -508,15 +555,24 @@ def build_server(config: ServerConfig) -> AgentServer:
 
 
 def _safety_refusal(config: ServerConfig) -> Optional[str]:
-    """Return a reason to refuse start for an unsafe secure-by-default posture."""
+    """Return a reason to refuse start for an unsafe secure-by-default posture.
+
+    ``SWE_AGENT_TRUST_NETWORK=1`` is a positive assertion that an outer layer
+    (Cloud Run IAM, IAP, a sidecar reverse proxy) has authenticated the caller,
+    so the non-loopback-needs-token rule is allowed to relax. The YOLO /
+    auto-accept rule is NOT relaxed: mutating modes still require a token because
+    a misconfigured outer layer would let the agent run arbitrary shell.
+    """
     loopback = config.host in _LOOPBACK
+    trust_network = os.environ.get("SWE_AGENT_TRUST_NETWORK") == "1"
     if not config.token:
         if config.approval != ApprovalMode.READ_ONLY:
             return (f"refusing to start: approval={config.approval.value} (allows mutations/"
                     f"shell) with no --token. Set a token or use --approval read-only.")
-        if not loopback:
+        if not loopback and not trust_network:
             return (f"refusing to start: bound to non-loopback host {config.host} with no "
-                    f"--token. Set a token or bind 127.0.0.1.")
+                    f"--token. Set a token, bind 127.0.0.1, or set "
+                    f"SWE_AGENT_TRUST_NETWORK=1 if outer-layer auth is in place.")
     return None
 
 
@@ -561,7 +617,12 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="swe_agent.server",
                                 description="HTTP/SSE bridge for the SWE agent.")
     p.add_argument("--host", default=os.environ.get("SWE_AGENT_SERVER_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int, default=int(os.environ.get("SWE_AGENT_SERVER_PORT", "8765")))
+    # Cloud Run injects $PORT (typically 8080); keep SWE_AGENT_SERVER_PORT as the
+    # explicit per-app override, and fall back to the legacy 8765 for local dev.
+    p.add_argument("--port", type=int,
+                   default=int(os.environ.get("PORT")
+                               or os.environ.get("SWE_AGENT_SERVER_PORT")
+                               or "8765"))
     p.add_argument("--model", "-m", default=DEFAULT_MODEL)
     p.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE)
     p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX)
@@ -574,6 +635,9 @@ def main(argv=None) -> int:
                         "edits; yolo allows everything (dangerous over HTTP)")
     p.add_argument("--token", default=os.environ.get("SWE_AGENT_SERVER_TOKEN"),
                    help="Require this bearer token (env: SWE_AGENT_SERVER_TOKEN)")
+    p.add_argument("--static-dir", default=os.environ.get("SWE_AGENT_STATIC_DIR"),
+                   help="Serve a built SPA bundle (e.g. web/dist) for non-/api/* GETs. "
+                        "Used in single-container deployments like Cloud Run.")
     p.add_argument("--no-persist", action="store_true", help="Don't save sessions to disk")
     p.add_argument("--no-preflight", action="store_true", help="Skip the Ollama server/model check")
     p.add_argument("--insecure", action="store_true",
@@ -586,6 +650,7 @@ def main(argv=None) -> int:
         num_ctx=args.num_ctx, temperature=args.temperature, max_steps=args.max_steps,
         cwd=Path(args.cwd).resolve() if args.cwd else Path.cwd(),
         approval=_approval_from(args.approval), token=args.token, persist=not args.no_persist,
+        static_dir=Path(args.static_dir).resolve() if args.static_dir else None,
     )
     serve(config, preflight=not args.no_preflight, insecure=args.insecure)
     return 0
