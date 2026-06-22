@@ -46,6 +46,23 @@ It supports parallel sub-agents with **isolated private context** — subagents 
    ./ollama-agent --yolo "delete all __pycache__ and run tests"
    ```
 
+5. Hybrid (cloud-first, local warmup in background):
+   ```bash
+   # Run the cloud-backed agent immediately while the local model warms up in
+   # the background, ready for a later --local run.
+   ./hybrid-agent "refactor the config loader"
+
+   # Forward any cloud-agent options (provider, dry-run, etc.) untouched.
+   ./hybrid-agent --provider openai "add type hints"
+
+   # Force the local-only Ollama path (strips --local, defers to ollama-agent).
+   ./hybrid-agent --local "explore project"
+   ```
+   Set `SWE_AGENT_PROVIDER` to pick the cloud provider and `OLLAMA_AGENT_MODEL`
+   to choose the local model that gets warmed. Local warmup is best-effort and
+   never blocks or fails the cloud run; its output is written to
+   `/tmp/swe-agent-hybrid-warmup.log`.
+
 ## Core Components
 
 - `swe_agent/` — The agent package: tool-calling loop, tools, Ollama transport, sessions.
@@ -53,6 +70,8 @@ It supports parallel sub-agents with **isolated private context** — subagents 
 - `swe_agent/server.py` — HTTP/SSE bridge so a web UI can drive the agent (see Web UI).
 - `web/` — A React/Vite dashboard whose coding chat streams from the agent.
 - `ollama-agent` — Portable bash launcher (resolves paths, ensures server, defaults to coder model).
+- `cloud-agent` — Bash launcher for cloud-backed providers (minimax, kimi, nemotron, openai).
+- `hybrid-agent` — Cloud-first launcher: warms the local model in the background, then runs `cloud-agent`; `--local` defers to `ollama-agent`.
 - `ensure-ollama.sh` — Idempotent helper to start Ollama server if needed.
 
 ## Web UI (dashboard)

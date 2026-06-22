@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# hybrid-agent — cloud-first launcher that warms a local Ollama model in the background
+#
+# Default flow: start (or reuse) the local Ollama server, kick off a best-effort
+# background warmup of the preferred local model, then immediately run the
+# cloud-backed agent via cloud-agent. This gives you a fast cloud session right
+# away while the local model becomes ready for a later `--local` run.
+#
+# Usage:
+#   hybrid-agent "refactor the config loader"                # cloud-first + bg warmup
+#   hybrid-agent --provider openai "add type hints"          # forwarded to cloud-agent
+#   hybrid-agent --local "explore project"                   # force local Ollama path
+#
+# Environment:
+#   SWE_AGENT_PROVIDER   selects the cloud provider used by cloud-agent (default nemotron)
+#   OLLAMA_AGENT_MODEL   selects the local model to warm (default qwen2.5-coder:7b)
+#
+# The local warmup is best-effort: failures are logged but never block the cloud run.
+
+set -euo pipefail
+
+# Resolve the real location even if invoked via symlink (matches ollama-agent/cloud-agent)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+AGENT_DIR="$(dirname "$SCRIPT_PATH")"
+OLLAMA_LAUNCHER="$AGENT_DIR/ollama-agent"
+CLOUD_LAUNCHER="$AGENT_DIR/cloud-agent"
+ENSURE_SCRIPT="$AGENT_DIR/ensure-ollama.sh"
+
+# Keep the local model default in sync with ollama-agent's default.
+DEFAULT_MODEL="qwen2.5-coder:7b"
+MODEL="${OLLAMA_AGENT_MODEL:-$DEFAULT_MODEL}"
+
+# --local forces the direct local Ollama path: strip the flag and hand off.
+if [[ "${1:-}" == "--local" ]]; then
+  shift
+  exec "$OLLAMA_LAUNCHER" "$@"
+fi
+
+# Cloud-first mode below.
+CLOUD_PROVIDER="${SWE_AGENT_PROVIDER:-nemotron}"
+WARMUP_LOG="/tmp/swe-agent-hybrid-warmup.log"
+
+# Best-effort: ensure the Ollama server is up (idempotent, non-fatal).
+if [[ -x "$ENSURE_SCRIPT" ]]; then
+  "$ENSURE_SCRIPT" >/dev/null 2>&1 || true
+fi
+
+# Best-effort background warmup of the local model. This must never block or
+# kill the cloud run, so it is fully guarded and detached.
+mkdir -p "$(dirname "$WARMUP_LOG")" 2>/dev/null || true
+{
+  {
+    echo "=== hybrid-agent warmup $(date) ==="
+    echo "model: $MODEL"
+    # Pull (no-op if present) then issue a tiny warmup generation.
+    ollama pull "$MODEL" || true
+    ollama run "$MODEL" "warmup: reply with ok" || true
+  } >"$WARMUP_LOG" 2>&1 || true
+} &
+disown 2>/dev/null || true
+
+# Concise status line.
+echo "hybrid-agent: cloud provider=${CLOUD_PROVIDER} | warming local model=${MODEL} (bg) | warmup log=${WARMUP_LOG}"
+
+# Run the cloud-backed agent immediately, forwarding all task arguments.
+exec "$CLOUD_LAUNCHER" "$@"
