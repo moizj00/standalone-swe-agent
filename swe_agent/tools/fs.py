@@ -78,6 +78,9 @@ def edit(ctx: ToolContext, path: str, old_string: str, new_string: str,
     p = ctx.resolve(path)
     if not p.exists():
         return f"Error: file not found: {path}"
+    if old_string == "":
+        return (f"Error: old_string must not be empty in {path}; an empty anchor "
+                f"would splice new_string between every character.")
     try:
         original = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
@@ -115,6 +118,9 @@ def multi_edit(ctx: ToolContext, path: str, edits: List[dict]) -> str:
         replace_all = ed.get("replace_all", False)
         if old is None:
             return f"Error: edit #{i} is missing old_string (no changes written)"
+        if old == "":
+            return (f"Error: edit #{i} has an empty old_string; an empty anchor would "
+                    f"splice new_string between every character (no changes written)")
         count = working.count(old)
         if count == 0:
             snippet = old[:60].replace("\n", "\\n")
