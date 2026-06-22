@@ -223,17 +223,30 @@ def _model_base(name: str) -> str:
 
 
 def model_available(model: str, available: List[str]) -> bool:
-    """True when *model* is present in Ollama's tag list (loose tag/base matching)."""
+    """True when *model* is present in Ollama's tag list.
+
+    A request that pins an explicit tag (``name:tag``) must match that exact tag —
+    a different tag of the same base does not count. A request with no tag matches
+    any tag of that base (loose matching)."""
     if not model or not available:
         return False
+    if model in available:
+        return True
+    if ":" in model:
+        return False  # explicit tag: exact match only
     base = _model_base(model)
-    return model in available or any(_model_base(n) == base for n in available)
+    return any(_model_base(n) == base for n in available)
 
 
 def _exact_model_name(model: str, available: List[str]) -> Optional[str]:
-    """Return the concrete tag Ollama reports for a requested/base model name."""
+    """Return the concrete tag Ollama reports for a requested/base model name.
+
+    An explicit tag (``name:tag``) only resolves when that exact tag is present;
+    a bare base name resolves to the first available tag sharing that base."""
     if model in available:
         return model
+    if ":" in model:
+        return None  # explicit tag: exact match only
     base = _model_base(model)
     for name in available:
         if _model_base(name) == base:
