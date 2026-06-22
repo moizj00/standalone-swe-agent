@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from . import llm, prompts
 from .agent import Agent
@@ -347,7 +348,9 @@ def parse_args(argv=None):
     # Subcommands that bypass agent loop
     p.add_argument("--diff", action="store_true", help="Show pending uncommitted changes and exit")
     p.add_argument("--apply", action="store_true", help="Stage and commit all pending changes, then exit")
-    p.add_argument("--revert", action="store_true", help="Discard all uncommitted changes, then exit")
+    p.add_argument("--revert", action="store_true", help="Discard all uncommitted changes, then exit (requires --force)")
+    p.add_argument("--force", action="store_true",
+                   help="Confirm destructive operations such as --revert")
     p.add_argument("--test", action="store_true", dest="run_test",
                    help="Run configured test command and exit")
     p.add_argument("--config-get", metavar="KEY", default=None,
@@ -500,14 +503,37 @@ def main(argv=None):
 
 # --------------------------------------------------------------------------- subcommands
 
-def _git_run(cwd: Path, args: list) -> str:
-    """Run a git command and return stdout."""
+class _GitResult(NamedTuple):
+    """Structured outcome of a git invocation so callers can branch on returncode."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    def text(self) -> str:
+        """stdout, plus stderr appended when the command failed (for printing)."""
+        out = (self.stdout or "").strip()
+        if not self.ok and self.stderr.strip():
+            out = (out + "\n" + self.stderr.strip()).strip()
+        return out
+
+
+def _git_run(cwd: Path, args: list) -> _GitResult:
+    """Run a git command and return its returncode, stdout, and stderr."""
     try:
         res = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=30)
-        return (res.stdout or "").strip() + (("\n" + res.stderr.strip()) if res.returncode else "")
-    except Exception as e:
-        return f"Error: {e}"
+        return _GitResult(res.returncode, res.stdout or "", res.stderr or "")
+    except FileNotFoundError:
+        return _GitResult(127, "", "git is not installed or not on PATH")
+    except subprocess.TimeoutExpired:
+        return _GitResult(124, "", "git command timed out")
+    except Exception as e:  # noqa: BLE001
+        return _GitResult(1, "", str(e))
 
 
 def _resolve_cwd(args) -> Path:
@@ -517,8 +543,8 @@ def _resolve_cwd(args) -> Path:
 def cmd_diff(args) -> int:
     """Show uncommitted changes (git diff + git diff --staged)."""
     cwd = _resolve_cwd(args)
-    staged = _git_run(cwd, ["diff", "--staged"])
-    unstaged = _git_run(cwd, ["diff"])
+    staged = _git_run(cwd, ["diff", "--staged"]).stdout.strip()
+    unstaged = _git_run(cwd, ["diff"]).stdout.strip()
     if staged:
         print("=== Staged ===")
         print(staged)
@@ -533,21 +559,29 @@ def cmd_diff(args) -> int:
 def cmd_apply(args) -> int:
     """Stage and commit all pending changes."""
     cwd = _resolve_cwd(args)
-    out = _git_run(cwd, ["add", "-A"])
-    if "Error" in out:
-        print(out)
+    add = _git_run(cwd, ["add", "-A"])
+    if not add.ok:
+        print(add.text())
         return 1
-    out = _git_run(cwd, ["commit", "-m", "agent: apply pending changes"])
-    print(out)
-    return 0 if "Error" not in out else 1
+    commit = _git_run(cwd, ["commit", "-m", "agent: apply pending changes"])
+    print(commit.text())
+    return 0 if commit.ok else 1
 
 
 def cmd_revert(args) -> int:
-    """Discard all uncommitted changes."""
+    """Discard all uncommitted changes. Destructive -- requires --force."""
+    if not getattr(args, "force", False):
+        print("Refusing to revert without --force: this discards ALL uncommitted and "
+              "untracked changes (git checkout -- . && git clean -fd). Re-run with --force "
+              "to proceed.")
+        return 1
     cwd = _resolve_cwd(args)
-    _git_run(cwd, ["checkout", "--", "."])
-    # Also clean untracked files
-    _git_run(cwd, ["clean", "-fd"])
+    checkout = _git_run(cwd, ["checkout", "--", "."])
+    clean = _git_run(cwd, ["clean", "-fd"])
+    if not checkout.ok or not clean.ok:
+        msg = (checkout.text() + "\n" + clean.text()).strip()
+        print(msg or "Revert failed.")
+        return 1
     print("All uncommitted changes reverted.")
     return 0
 
@@ -636,11 +670,10 @@ def _auto_create_branch(cwd: Path, task: str) -> None:
     slug = slug[:20] or "task"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"agent/{slug}-{timestamp}"
-    try:
-        subprocess.run(["git", "checkout", "-b", branch], cwd=str(cwd),
-                       capture_output=True, text=True, timeout=10)
-    except Exception:
-        pass  # non-fatal: agent can still work on current branch
+    res = _git_run(cwd, ["checkout", "-b", branch])
+    if not res.ok:
+        # non-fatal: agent can still work on the current branch
+        print(f"(could not auto-create branch {branch}: {res.stderr.strip()})")
 
 
 def _emit_json_report(cwd: Path, result: str, session_id: str) -> None:
