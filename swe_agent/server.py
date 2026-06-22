@@ -50,7 +50,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 from . import llm, prompts
 from .agent import Agent
 from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
-                     DEFAULT_TEMPERATURE, MAX_STEPS, SESSION_DIR)
+                     DEFAULT_OLLAMA_MODEL, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE,
+                     MAX_STEPS, SESSION_DIR)
+from .providers import (CLOUD_PROVIDER_NAMES, check_cloud_provider, get_provider,
+                        is_cloud_provider)
 from .session import Session, build_env_context, load_project_instructions
 from .tools import ADVERTISED, TOOLS, VALID_NAMES
 from .tools.base import ToolContext
@@ -87,8 +90,10 @@ class ServerConfig:
     approval: ApprovalMode = ApprovalMode.READ_ONLY
     token: Optional[str] = None
     persist: bool = True
+    provider: str = DEFAULT_PROVIDER
+    api_key: str = ""
     # Injectable for tests: build an Agent for a session id. Defaults to a real,
-    # Ollama-backed agent built from this config.
+    # provider-backed (cloud or Ollama) agent built from this config.
     agent_factory: Optional[Callable[["ServerConfig", str], Agent]] = None
 
 
@@ -182,17 +187,20 @@ def default_agent_factory(config: ServerConfig, session_id: str) -> Agent:
     system = prompts.build_system_prompt(
         env_context=env, project_instructions=proj,
         plan_mode=(config.approval == ApprovalMode.READ_ONLY),
+        provider=config.provider,
     )
     ctx = ToolContext(
         cwd=cwd, approval=config.approval, approve_cb=_server_approval_cb,
         bg_registry=BackgroundRegistry(), model=config.model, base_url=config.base_url,
         num_ctx=config.num_ctx, temperature=config.temperature,
+        provider=config.provider, api_key=config.api_key,
         confine=True,  # a network-driven agent must not read/write outside the workspace
     )
     return Agent(
         model=config.model, ctx=ctx, system_prompt=system, stream=True,
         verbose=False, max_steps=config.max_steps, base_url=config.base_url,
         num_ctx=config.num_ctx, temperature=config.temperature,
+        provider=config.provider, api_key=config.api_key,
     )
 
 
@@ -526,10 +534,16 @@ def serve(config: ServerConfig, *, preflight: bool = True, insecure: bool = Fals
         print(f"\033[31m{refusal}\033[0m\n  (override with --insecure if you understand the risk.)")
         return
     if preflight:
-        ok, msg = llm.check_server(config.base_url, config.model)
-        if not ok:
-            print(f"\033[31m{msg}\033[0m")
-            return
+        if is_cloud_provider(config.provider):
+            ok, msg = check_cloud_provider(config.provider)
+            if not ok:
+                print(f"\033[31m{msg}\033[0m")
+                return
+        else:
+            ok, msg = llm.check_server(config.base_url, config.model)
+            if not ok:
+                print(f"\033[31m{msg}\033[0m")
+                return
     httpd = build_server(config)
     host, port = httpd.server_address[0], httpd.server_address[1]
     tokeninfo = "token REQUIRED" if config.token else "\033[33mNO TOKEN (open on this host)\033[0m"
@@ -557,13 +571,46 @@ def _approval_from(name: str) -> ApprovalMode:
     }.get(name.lower(), ApprovalMode.READ_ONLY)
 
 
+def resolve_server_runtime(args) -> Tuple[str, str, str, str]:
+    """Resolve (provider, model, base_url, api_key) from parsed args.
+
+    Mirrors cli.resolve_runtime_config: when a cloud provider is selected and the
+    user left model/base-url at their Ollama defaults, fill them from the provider
+    preset, and resolve the api key from the provider spec unless --api-key was
+    given explicitly. Pure (no I/O) so it is unit-testable without a server.
+    """
+    provider = (getattr(args, "provider", None) or DEFAULT_PROVIDER).lower()
+    model = args.model
+    base_url = args.base_url
+    api_key = getattr(args, "api_key", "") or ""
+
+    if is_cloud_provider(provider):
+        spec = get_provider(provider)
+        if model in (DEFAULT_MODEL, DEFAULT_OLLAMA_MODEL):
+            model = spec.default_model
+        if base_url == DEFAULT_OLLAMA_BASE:
+            base_url = spec.base_url
+        if not api_key:
+            api_key = spec.resolve_api_key()
+    else:
+        api_key = ""
+        if provider == "ollama" and base_url == DEFAULT_OLLAMA_BASE:
+            base_url = DEFAULT_OLLAMA_BASE
+    return provider, model, base_url, api_key
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="swe_agent.server",
                                 description="HTTP/SSE bridge for the SWE agent.")
     p.add_argument("--host", default=os.environ.get("SWE_AGENT_SERVER_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("SWE_AGENT_SERVER_PORT", "8765")))
+    p.add_argument("--provider", "-p", default=DEFAULT_PROVIDER,
+                   choices=list(CLOUD_PROVIDER_NAMES) + ["ollama"],
+                   help=f"LLM backend (default: {DEFAULT_PROVIDER})")
     p.add_argument("--model", "-m", default=DEFAULT_MODEL)
     p.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE)
+    p.add_argument("--api-key", default=os.environ.get("SWE_AGENT_API_KEY", "") or "",
+                   help="Cloud API key (env: SWE_AGENT_API_KEY; provider default if omitted)")
     p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX)
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument("--max-steps", type=int, default=MAX_STEPS)
@@ -575,17 +622,21 @@ def main(argv=None) -> int:
     p.add_argument("--token", default=os.environ.get("SWE_AGENT_SERVER_TOKEN"),
                    help="Require this bearer token (env: SWE_AGENT_SERVER_TOKEN)")
     p.add_argument("--no-persist", action="store_true", help="Don't save sessions to disk")
-    p.add_argument("--no-preflight", action="store_true", help="Skip the Ollama server/model check")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="Skip the provider/API key (or Ollama server/model) check")
     p.add_argument("--insecure", action="store_true",
                    help="Allow starting without a token in a mutating/non-loopback posture "
                         "(you accept the RCE/file-write exposure)")
     args = p.parse_args(argv)
 
+    provider, model, base_url, api_key = resolve_server_runtime(args)
+
     config = ServerConfig(
-        host=args.host, port=args.port, model=args.model, base_url=args.base_url,
+        host=args.host, port=args.port, model=model, base_url=base_url,
         num_ctx=args.num_ctx, temperature=args.temperature, max_steps=args.max_steps,
         cwd=Path(args.cwd).resolve() if args.cwd else Path.cwd(),
         approval=_approval_from(args.approval), token=args.token, persist=not args.no_persist,
+        provider=provider, api_key=api_key,
     )
     serve(config, preflight=not args.no_preflight, insecure=args.insecure)
     return 0

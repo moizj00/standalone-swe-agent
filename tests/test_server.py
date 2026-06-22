@@ -18,8 +18,10 @@ from swe_agent.config import ApprovalMode
 from swe_agent.intent_gate import IntentGate
 from swe_agent.loop_guard import LoopGuard
 from swe_agent.quality_gate import QualityGate
-from swe_agent.server import (ServerConfig, build_server, gemini_tool_declarations,
+from swe_agent.server import (ServerConfig, build_server, default_agent_factory,
+                              gemini_tool_declarations, resolve_server_runtime,
                               translate_messages, _prime_agent)
+from swe_agent.config import DEFAULT_MODEL, DEFAULT_OLLAMA_BASE, DEFAULT_PROVIDER
 from swe_agent.tools.base import ToolContext
 from swe_agent.tools.exec import BackgroundRegistry
 
@@ -247,3 +249,100 @@ def test_auth_wrong_token(srv_token):
     r = requests.post(srv_token + "/api/chat", json=_user("x"),
                       headers={"Authorization": "Bearer nope"}, timeout=10)
     assert r.status_code == 401
+
+
+# ---- cloud provider support -----------------------------------------------
+
+def test_server_config_carries_provider_and_api_key(tmp_path):
+    cfg = ServerConfig(cwd=tmp_path, provider="openai", api_key="sk-test")
+    assert cfg.provider == "openai"
+    assert cfg.api_key == "sk-test"
+
+
+def test_server_config_default_provider(tmp_path):
+    # config.DEFAULT_PROVIDER is a cloud provider ('nemotron') by default.
+    cfg = ServerConfig(cwd=tmp_path)
+    assert cfg.provider == DEFAULT_PROVIDER
+    assert cfg.api_key == ""
+
+
+class _Args:
+    """Minimal stand-in for argparse.Namespace for resolve_server_runtime."""
+
+    def __init__(self, **kw):
+        self.provider = kw.get("provider", DEFAULT_PROVIDER)
+        self.model = kw.get("model", DEFAULT_MODEL)
+        self.base_url = kw.get("base_url", DEFAULT_OLLAMA_BASE)
+        self.api_key = kw.get("api_key", "")
+
+
+def test_resolve_server_runtime_cloud_fills_provider_defaults():
+    args = _Args(provider="openai")
+    provider, model, base_url, api_key = resolve_server_runtime(args)
+    from swe_agent.providers import get_provider
+    spec = get_provider("openai")
+    assert provider == "openai"
+    assert model == spec.default_model       # filled from preset (was Ollama default)
+    assert base_url == spec.base_url          # filled from preset
+    assert api_key == spec.resolve_api_key()  # resolved from spec when not given
+
+
+def test_resolve_server_runtime_respects_explicit_overrides():
+    args = _Args(provider="openai", model="gpt-custom",
+                 base_url="https://example.test/v1", api_key="sk-explicit")
+    provider, model, base_url, api_key = resolve_server_runtime(args)
+    assert (provider, model, base_url, api_key) == (
+        "openai", "gpt-custom", "https://example.test/v1", "sk-explicit")
+
+
+def test_resolve_server_runtime_ollama_path():
+    args = _Args(provider="ollama")
+    provider, model, base_url, api_key = resolve_server_runtime(args)
+    assert provider == "ollama"
+    assert model == DEFAULT_MODEL
+    assert base_url == DEFAULT_OLLAMA_BASE
+    assert api_key == ""
+
+
+def test_cloud_preflight_refuses_without_key(monkeypatch, tmp_path):
+    """serve() must use check_cloud_provider for cloud providers and bail when
+    no key is available — without ever building/binding a server."""
+    import swe_agent.server as server_mod
+
+    calls = {"cloud": 0, "ollama": 0, "built": 0}
+
+    def fake_check_cloud(name):
+        calls["cloud"] += 1
+        return False, "no api key"
+
+    def fake_check_server(base_url, model):
+        calls["ollama"] += 1
+        return True, "ok"
+
+    def fake_build_server(config):
+        calls["built"] += 1
+        raise AssertionError("server must not be built when preflight fails")
+
+    monkeypatch.setattr(server_mod, "check_cloud_provider", fake_check_cloud)
+    monkeypatch.setattr(server_mod.llm, "check_server", fake_check_server)
+    monkeypatch.setattr(server_mod, "build_server", fake_build_server)
+
+    cfg = ServerConfig(cwd=tmp_path, provider="openai", api_key="",
+                       agent_factory=echo_factory)
+    server_mod.serve(cfg, preflight=True)  # returns (prints refusal), no raise
+    assert calls["cloud"] == 1
+    assert calls["ollama"] == 0
+    assert calls["built"] == 0
+
+
+def test_default_agent_factory_propagates_provider_and_api_key(tmp_path):
+    """default_agent_factory must build an Agent whose provider/api_key (and the
+    ToolContext's) come from the config. 'nemotron' has a dummy-key fallback so
+    no real key/network is needed; no chat() call is made."""
+    cfg = ServerConfig(cwd=tmp_path, provider="nemotron", api_key="sk-cfg",
+                       persist=False)
+    agent = default_agent_factory(cfg, "s1")
+    assert agent.provider == "nemotron"
+    assert agent.api_key == "sk-cfg"
+    assert agent.ctx.provider == "nemotron"
+    assert agent.ctx.api_key == "sk-cfg"
