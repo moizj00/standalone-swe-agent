@@ -1,0 +1,15 @@
+{
+  "name": "swe-agent-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron desktop frame for the standalone SWE coding agent (spawns the Python agent server + React dashboard).",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "postinstall": "node -e \"process.exit(0)\""
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
