@@ -123,8 +123,14 @@ a bearer token. Details: [docs/dashboard-integration.md](docs/dashboard-integrat
 - web_search, web_fetch
 
 **Sub-agents (Parallelism)**
-- spawn_subagent (task, description; supports 20+ concurrent)
-- get_subagent_result (poll for summary), list_active_subagents
+- spawn_subagent (task, description, mode; supports 20+ concurrent). `mode` is one of
+  `audit`/`review` (read-only workers, run in the parent cwd) or `implement`/`test`
+  (mutating workers, run in an isolated git worktree under `.agent/worktrees/<id>`).
+  Default mode is `audit`. Mutating modes are refused when the parent is read-only or
+  when the cwd is not a git repo.
+- get_subagent_result (poll for summary; reports mode/status and whether a diff exists)
+- get_subagent_diff (inspect a mutating sub-agent's worktree changes)
+- discard_subagent_workspace (drop a mutating sub-agent's worktree), list_active_subagents
 
 **Completion**
 - task_complete (explicit, structured end-of-run signal)
