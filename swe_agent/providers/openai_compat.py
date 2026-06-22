@@ -12,7 +12,60 @@ import requests
 from ..config import BACKOFF_BASE, CONNECT_TIMEOUT, MAX_RETRIES, READ_TIMEOUT
 
 _session = requests.Session()
+# Only transient transport errors and retryable HTTP statuses (429 / 5xx, which we
+# re-raise as requests.HTTPError) are retried. Client errors (4xx, auth, malformed
+# bodies) raise CloudAPIError, which is NOT retryable so the clear message surfaces
+# immediately instead of being buried after MAX_RETRIES attempts.
 _RETRYABLE = (requests.ConnectionError, requests.Timeout, requests.HTTPError)
+
+
+class CloudAPIError(RuntimeError):
+    """Non-retryable error from an OpenAI-compatible cloud API.
+
+    Covers 4xx client/auth errors, error bodies returned with HTTP 200, and
+    malformed responses (missing choices). Kept out of ``_RETRYABLE`` so it
+    propagates straight to the caller with a readable message.
+    """
+
+
+def _extract_api_error(data: dict) -> Optional[str]:
+    """Return a human-readable message if the JSON body carries an API error."""
+    if not isinstance(data, dict):
+        return None
+    err = data.get("error")
+    if not err:
+        return None
+    if isinstance(err, dict):
+        return err.get("message") or err.get("code") or json.dumps(err, ensure_ascii=False)
+    return str(err)
+
+
+def _check_http_status(r: "requests.Response") -> None:
+    """Raise on a non-OK HTTP response, surfacing the API error body.
+
+    429 and 5xx are raised as ``requests.HTTPError`` (retryable). All other 4xx
+    errors raise ``CloudAPIError`` (non-retryable) with a tailored auth hint for
+    401/403 so the user sees the real cause immediately.
+    """
+    if r.ok:
+        return
+    status = r.status_code
+    detail = ""
+    try:
+        body = r.json()
+        detail = _extract_api_error(body) or (r.text or "")
+    except (ValueError, json.JSONDecodeError):
+        detail = r.text or ""
+    detail = (detail or "").strip()[:500]
+    if status == 401:
+        msg = f"Authentication failed (401): check your API key. {detail}".strip()
+    elif status == 403:
+        msg = f"Access forbidden (403): {detail}".strip()
+    else:
+        msg = f"{status} {r.reason}: {detail}".strip()
+    if status == 429 or status >= 500:
+        raise requests.HTTPError(msg, response=r)
+    raise CloudAPIError(msg)
 
 
 def to_openai_messages(messages: List[dict]) -> List[dict]:
@@ -114,12 +167,19 @@ class OpenAICompatibleProvider:
     def _chat_once(self, url: str, headers: dict, payload: dict) -> Tuple[str, List[dict]]:
         r = _session.post(url, headers=headers, json=payload,
                           timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
-        if not r.ok:
-            detail = (r.text or "")[:300]
-            raise requests.HTTPError(f"{r.status_code} {r.reason}: {detail}", response=r)
-        data = r.json()
-        choice = (data.get("choices") or [{}])[0]
-        msg = choice.get("message") or {}
+        _check_http_status(r)
+        try:
+            data = r.json()
+        except (ValueError, json.JSONDecodeError) as e:
+            raise CloudAPIError(f"Cloud API returned non-JSON response: {(r.text or '')[:300]}") from e
+        # Some OpenAI-compatible gateways return HTTP 200 with an {"error": ...} body.
+        api_err = _extract_api_error(data)
+        if api_err:
+            raise CloudAPIError(f"Cloud API error: {api_err}")
+        choices = data.get("choices")
+        if not choices:
+            raise CloudAPIError("Cloud API returned no choices in response.")
+        msg = choices[0].get("message") or {}
         return msg.get("content") or "", msg.get("tool_calls") or []
 
     def _chat_stream(
@@ -130,18 +190,30 @@ class OpenAICompatibleProvider:
         tool_chunks: List[dict] = []
         with _session.post(url, headers=headers, json=payload, stream=True,
                            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as r:
-            r.raise_for_status()
+            _check_http_status(r)
             for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data: "):
+                if not line:
                     continue
-                chunk_s = line[6:].strip()
+                line = line.lstrip("\ufeff").strip()
+                if not line.startswith("data:"):
+                    # Ignore SSE comments/keep-alives and event/id fields.
+                    continue
+                chunk_s = line[5:].strip()  # tolerate both "data: {" and "data:{"
+                if not chunk_s:
+                    continue
                 if chunk_s == "[DONE]":
                     break
                 try:
                     chunk = json.loads(chunk_s)
                 except json.JSONDecodeError:
                     continue
-                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                err = _extract_api_error(chunk)
+                if err:
+                    raise CloudAPIError(f"Cloud API stream error: {err}")
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
                 piece = delta.get("content")
                 if piece:
                     content_parts.append(piece)
