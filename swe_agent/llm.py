@@ -129,20 +129,62 @@ def extract_inline_tool_calls(content: str, valid_names) -> Tuple[List[dict], st
 
 # --------------------------------------------------------------------------- transport
 
+class OllamaError(RuntimeError):
+    """A clear, non-retryable error originating from the Ollama server.
+
+    Raised for application-level failures (HTTP 4xx, an ``error`` field in the
+    response body, or a non-JSON body) where retrying the identical request is
+    pointless and would only hide the server's own diagnostic message.
+    """
+
+
+def _error_body(r: "requests.Response") -> str:
+    """Best-effort extraction of a human-readable error from a response body."""
+    try:
+        data = r.json()
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])
+    except ValueError:
+        pass
+    text = (r.text or "").strip()
+    return text[:500] if text else f"HTTP {r.status_code}"
+
+
 def _do_request(url: str, payload: dict, on_token: Optional[Callable[[str], None]]) -> Tuple[str, List[dict]]:
     content_parts: List[str] = []
     tool_calls: List[dict] = []
-    with _session.post(url, json=payload, stream=payload.get("stream", False),
+    streaming = bool(payload.get("stream"))
+    with _session.post(url, json=payload, stream=streaming,
                        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as r:
-        r.raise_for_status()
-        if payload.get("stream"):
+        try:
+            r.raise_for_status()
+        except requests.HTTPError:
+            status = r.status_code
+            detail = _error_body(r)
+            # 4xx (except 429) are caller/config faults: model not pulled, bad
+            # payload. Retrying is useless, so surface the body immediately as a
+            # clear, non-retryable error instead of a generic exhausted-retries
+            # message that swallows the server's explanation.
+            if 400 <= status < 500 and status != 429:
+                raise OllamaError(f"Ollama returned HTTP {status}: {detail}") from None
+            raise  # 5xx / 429: transient -> let the retry loop handle it
+        if streaming:
             for line in r.iter_lines(decode_unicode=True):
                 if not line:
                     continue
                 try:
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
+                    # Ollama emits one complete JSON object per line; a line that
+                    # does not parse is garbage/partial -> skip it rather than abort.
                     continue
+                if not isinstance(chunk, dict):
+                    continue
+                # Ollama can report a fatal error mid-stream (e.g. model OOM on
+                # load) with HTTP 200. Without this the agent would see empty
+                # content and silently spin.
+                if chunk.get("error"):
+                    raise OllamaError(f"Ollama error: {chunk['error']}")
                 msg = chunk.get("message") or {}
                 piece = msg.get("content")
                 if piece:
@@ -154,7 +196,17 @@ def _do_request(url: str, payload: dict, on_token: Optional[Callable[[str], None
                 if chunk.get("done"):
                     break
         else:
-            data = r.json()
+            try:
+                data = r.json()
+            except ValueError as e:
+                raise OllamaError(
+                    "Ollama returned a non-JSON response "
+                    f"(HTTP {r.status_code}): {(r.text or '').strip()[:200]!r}"
+                ) from e
+            if not isinstance(data, dict):
+                raise OllamaError(f"Ollama returned an unexpected response: {data!r}")
+            if data.get("error"):
+                raise OllamaError(f"Ollama error: {data['error']}")
             msg = data.get("message") or {}
             content_parts.append(msg.get("content") or "")
             tool_calls = msg.get("tool_calls") or []
@@ -181,12 +233,21 @@ def chat(messages: List[dict], model: str, tools: List[dict], *,
         )
 
     url = base_url.rstrip("/") + "/api/chat"
+    # Guard num_ctx: a bad env value (OLLAMA_NUM_CTX=0/"") or a caller passing a
+    # non-positive context would make Ollama fall back to its tiny ~4K default
+    # (or reject the request), defeating the whole reason we use /api/chat.
+    try:
+        ctx = int(num_ctx)
+    except (TypeError, ValueError):
+        ctx = DEFAULT_NUM_CTX
+    if ctx <= 0:
+        ctx = DEFAULT_NUM_CTX
     payload = {
         "model": model,
         "messages": messages,
         "stream": stream,
         "keep_alive": KEEP_ALIVE,
-        "options": {"num_ctx": num_ctx, "temperature": temperature, "top_p": DEFAULT_TOP_P},
+        "options": {"num_ctx": ctx, "temperature": temperature, "top_p": DEFAULT_TOP_P},
     }
     if use_tools and tools:
         payload["tools"] = tools
@@ -200,7 +261,16 @@ def chat(messages: List[dict], model: str, tools: List[dict], *,
             if attempt == MAX_RETRIES - 1:
                 break
             time.sleep(BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.3))
-    raise RuntimeError(f"Ollama request failed after {MAX_RETRIES} attempts: {last_err}")
+
+    if isinstance(last_err, requests.ConnectionError):
+        raise RuntimeError(
+            f"Cannot reach Ollama at {base_url} (connection refused after "
+            f"{MAX_RETRIES} attempts). Is the server running? Start it with "
+            f"'ollama serve'."
+        ) from last_err
+    raise RuntimeError(
+        f"Ollama request failed after {MAX_RETRIES} attempts: {last_err}"
+    ) from last_err
 
 
 def normalize(raw_tool_calls: List[dict]) -> List[dict]:
