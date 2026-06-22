@@ -15,6 +15,9 @@ import requests
 
 from swe_agent.agent import Agent
 from swe_agent.config import ApprovalMode
+from swe_agent.intent_gate import IntentGate
+from swe_agent.loop_guard import LoopGuard
+from swe_agent.quality_gate import QualityGate
 from swe_agent.server import (ServerConfig, build_server, gemini_tool_declarations,
                               translate_messages, _prime_agent)
 from swe_agent.tools.base import ToolContext
@@ -34,7 +37,10 @@ def echo_factory(config, sid):
     ctx = ToolContext(cwd=config.cwd, approval=config.approval,
                       approve_cb=lambda *a: True, bg_registry=BackgroundRegistry())
     return Agent(model="mock", ctx=ctx, system_prompt="test", stream=False,
-                 verbose=False, mock=echo_mock)
+                 verbose=False, mock=echo_mock,
+                 loop_guard=LoopGuard(enabled=False),
+                 quality_gate=QualityGate(enabled=False),
+                 intent_gate=IntentGate(enabled=False))
 
 
 def _start(cfg: ServerConfig):

@@ -13,6 +13,9 @@ import pytest
 
 from swe_agent.agent import Agent
 from swe_agent.config import ApprovalMode
+from swe_agent.intent_gate import IntentGate
+from swe_agent.loop_guard import LoopGuard
+from swe_agent.quality_gate import QualityGate
 from swe_agent.tools.base import ToolContext
 from swe_agent.tools.exec import BackgroundRegistry
 
@@ -53,5 +56,16 @@ def ctx(tmp_path: Path) -> ToolContext:
 
 
 def make_agent(ctx: ToolContext, mock: Callable, **kw) -> Agent:
+    """Build an Agent wired to a mock model with the guardrail subsystems OFF.
+
+    The agent-loop tests exercise raw loop mechanics (dispatch, tool observation,
+    task_complete, max-steps). The IntentGate/QualityGate/LoopGuard are product
+    features with their own dedicated suites (test_gating, test_quality_gate); left
+    enabled they would intercept these mock turns (blocking the first mutation,
+    rejecting short summaries). Callers can re-enable a gate by passing it in **kw.
+    """
+    kw.setdefault("loop_guard", LoopGuard(enabled=False))
+    kw.setdefault("quality_gate", QualityGate(enabled=False))
+    kw.setdefault("intent_gate", IntentGate(enabled=False))
     return Agent(model="mock", ctx=ctx, system_prompt="test", stream=False,
                  verbose=False, mock=mock, **kw)

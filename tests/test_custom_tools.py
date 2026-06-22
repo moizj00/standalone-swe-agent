@@ -9,6 +9,9 @@ import pytest
 
 from swe_agent.agent import Agent
 from swe_agent.config import ApprovalMode
+from swe_agent.intent_gate import IntentGate
+from swe_agent.loop_guard import LoopGuard
+from swe_agent.quality_gate import QualityGate
 from swe_agent.tools import custom
 from swe_agent.tools.base import ToolContext
 from swe_agent.tools.exec import BackgroundRegistry
@@ -32,7 +35,10 @@ def _ctx(tmp_path, approval=ApprovalMode.AUTO_ACCEPT):
 
 def _agent(tmp_path, extra, approval=ApprovalMode.AUTO_ACCEPT):
     return Agent(model="m", ctx=_ctx(tmp_path, approval), system_prompt="s",
-                 stream=False, verbose=False, mock=lambda m: ("", []), extra_tools=extra)
+                 stream=False, verbose=False, mock=lambda m: ("", []), extra_tools=extra,
+                 loop_guard=LoopGuard(enabled=False),
+                 quality_gate=QualityGate(enabled=False),
+                 intent_gate=IntentGate(enabled=False))
 
 
 # ---- validation -----------------------------------------------------------
