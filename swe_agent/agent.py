@@ -421,21 +421,16 @@ def _default_user_prompt(prompt: str) -> str:
 
 def run_subagent(task: str, description: str, model: str, cwd: str, base_url: str,
                  num_ctx: int, temperature: float, parent_approval, *,
-                 provider: str = DEFAULT_PROVIDER, api_key: str = "",
-                 mode: str = "audit") -> str:
+                 provider: str = DEFAULT_PROVIDER, api_key: str = "") -> str:
     """Run a full agent loop for a delegated sub-task in its own ToolContext.
 
-    Subagents run non-interactively (a background thread cannot prompt). The
-    ``mode`` describes the worker intent: "audit"/"review" are read-only workers,
-    "implement"/"test" are mutating workers. A read-only parent still forces a
-    read-only child regardless of mode; otherwise mutating modes auto-accept edits
-    (in their isolated cwd) while a dangerous shell command is still refused.
+    Subagents run non-interactively (a background thread cannot prompt). They inherit
+    read-only mode from a read-only parent; otherwise they auto-accept edits but a
+    dangerous shell command is still refused.
     """
     from .tools.exec import BackgroundRegistry
 
-    read_only = mode in ("audit", "review")
-    approval = (ApprovalMode.READ_ONLY
-                if (read_only or parent_approval == ApprovalMode.READ_ONLY)
+    approval = (ApprovalMode.READ_ONLY if parent_approval == ApprovalMode.READ_ONLY
                 else ApprovalMode.AUTO_ACCEPT)
 
     def cb(name: str, args: dict, reason: str) -> bool:
