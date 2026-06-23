@@ -44,8 +44,14 @@ def create_subagent_worktree(root: Path, subagent_id: str) -> Path:
     (e.g. the repo has no commits yet, so HEAD does not resolve).
     """
     root = Path(root)
-    workspace = root / WORKTREE_SUBDIR / subagent_id
-    workspace.parent.mkdir(parents=True, exist_ok=True)
+    container = root / WORKTREE_SUBDIR
+    workspace = container / subagent_id
+    container.mkdir(parents=True, exist_ok=True)
+    # Keep the whole worktree container out of the parent's index so a stray
+    # `git add -A` in the parent tree never stages worktree checkouts.
+    gitignore = container / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("*\n", encoding="utf-8")
     try:
         res = _git(["worktree", "add", "--detach", str(workspace), "HEAD"], root)
     except FileNotFoundError:
@@ -57,17 +63,31 @@ def create_subagent_worktree(root: Path, subagent_id: str) -> Path:
     return workspace
 
 
+def repo_subdir_prefix(cwd: Path) -> str:
+    """Return the repo-root-relative prefix of ``cwd`` (e.g. 'src/' or '').
+
+    Used to run a sub-agent at the same relative location inside its worktree
+    that the parent was launched from, so relative paths in tasks still resolve.
+    """
+    try:
+        res = _git(["rev-parse", "--show-prefix"], Path(cwd), timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
 def collect_worktree_diff(workspace: Path) -> str:
-    """Return the diff of all changes in ``workspace`` (including new files).
+    """Return the diff of all changes in ``workspace`` (including new and staged files).
 
     ``git add -A -N`` marks untracked files with intent-to-add so they appear in
-    ``git diff`` without actually staging content. Returns an empty string when
-    there are no changes.
+    the diff without staging content; diffing against HEAD then captures both
+    staged and unstaged changes a sub-agent may have made. Returns an empty
+    string when there are no changes.
     """
     workspace = Path(workspace)
     try:
         _git(["add", "-A", "-N"], workspace)
-        res = _git(["diff"], workspace)
+        res = _git(["diff", "HEAD"], workspace)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return f"Error collecting diff: {e}"
     return res.stdout or ""

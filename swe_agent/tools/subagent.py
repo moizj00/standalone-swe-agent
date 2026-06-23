@@ -27,7 +27,8 @@ from ..config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX,
                       DEFAULT_OLLAMA_BASE, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE,
                       SUBAGENT_MAX_WORKERS)
 from ..workspaces import (collect_worktree_diff, create_subagent_worktree,
-                          is_git_repo, remove_subagent_worktree)
+                          is_git_repo, remove_subagent_worktree,
+                          repo_subdir_prefix)
 from .base import ToolContext, ToolSpec, register
 
 SUBAGENT_MODES = ("audit", "implement", "test", "review")
@@ -114,7 +115,10 @@ def spawn_subagent(ctx: ToolContext, task: str, description: str,
             workspace = str(create_subagent_worktree(root, sub_id))
         except Exception as e:  # noqa: BLE001
             return f"Refused: could not create an isolated worktree for the sub-agent: {e}"
-        use_cwd = workspace
+        # Run the child at the same repo-relative location the parent was launched
+        # from, so relative paths in the task still resolve inside the worktree.
+        prefix = repo_subdir_prefix(root)
+        use_cwd = str(Path(workspace) / prefix) if prefix else workspace
 
     use_model = model or ctx.model or DEFAULT_MODEL
     base_url = ctx.base_url or DEFAULT_OLLAMA_BASE
@@ -164,6 +168,9 @@ def get_subagent_diff(ctx: ToolContext, subagent_id: str) -> str:
     if not record.has_workspace:
         return (f"Sub-agent {subagent_id} ({record.mode}) has no isolated workspace "
                 f"(only implement/test sub-agents produce a diff).")
+    if record.status == "running":
+        return (f"Sub-agent {subagent_id} is still running; collecting a diff now could race "
+                f"with its own git activity. Wait for get_subagent_result to report completion.")
     diff = collect_worktree_diff(Path(record.workspace))
     if not diff.strip():
         return f"Sub-agent {subagent_id} made no changes in its workspace."
@@ -176,6 +183,10 @@ def discard_subagent_workspace(ctx: ToolContext, subagent_id: str) -> str:
         return f"No sub-agent with id {subagent_id}. Known ids: {list(_SUBAGENTS.keys())}"
     if not record.has_workspace:
         return f"Sub-agent {subagent_id} ({record.mode}) has no workspace to discard."
+    if record.status == "running":
+        return (f"Refused: sub-agent {subagent_id} is still running inside its worktree. "
+                f"Discarding now would delete the directory it is working in. Wait for "
+                f"get_subagent_result to report completion first.")
     status = remove_subagent_worktree(Path(record.parent_cwd), Path(record.workspace))
     record.workspace = None
     return status

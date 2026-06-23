@@ -8,6 +8,7 @@ runs exactly as in production.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -154,6 +155,54 @@ def test_get_subagent_result_reports_mode_and_diff_hint(tmp_path, stub_runner):
     assert "mode=implement" in out
     assert "status=done" in out
     assert "get_subagent_diff" in out
+
+
+def test_worktree_container_is_gitignored(tmp_path, stub_runner):
+    _init_git_repo(tmp_path)
+    sub.spawn_subagent(_ctx(tmp_path), "do work", "impl", mode="implement")
+    gi = tmp_path / WORKTREE_SUBDIR / ".gitignore"
+    assert gi.exists()
+    assert gi.read_text(encoding="utf-8").strip() == "*"
+    # The parent tree must not see the worktree container as untracked.
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(tmp_path),
+                            capture_output=True, text=True).stdout
+    assert ".agent/worktrees" not in status
+
+
+def test_get_subagent_diff_includes_staged_changes(tmp_path, stub_runner):
+    _init_git_repo(tmp_path)
+    ctx = _ctx(tmp_path)
+    sub.spawn_subagent(ctx, "do work", "impl", mode="implement")
+    _wait_done()
+    rec = _only_record()
+    ws = Path(rec.workspace)
+    # Child stages a modified tracked file (unstaged git diff would miss this).
+    (ws / "readme.txt").write_text("staged change", encoding="utf-8")
+    subprocess.run(["git", "add", "readme.txt"], cwd=str(ws), capture_output=True)
+    diff = sub.get_subagent_diff(ctx, rec.id)
+    assert "staged change" in diff
+
+
+def test_diff_and_discard_refuse_while_running(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    release = threading.Event()
+
+    def _blocking(*a, **k):
+        release.wait(timeout=5)
+        return "(done)"
+
+    monkeypatch.setattr(agent_mod, "run_subagent", _blocking)
+    ctx = _ctx(tmp_path)
+    sub.spawn_subagent(ctx, "do work", "impl", mode="implement")
+    rec = _only_record()
+    try:
+        assert rec.status == "running"
+        assert "still running" in sub.get_subagent_diff(ctx, rec.id)
+        assert "still running" in sub.discard_subagent_workspace(ctx, rec.id)
+        assert Path(rec.workspace).exists()  # not discarded
+    finally:
+        release.set()
+        rec.future.result(timeout=5)
 
 
 def test_discard_subagent_workspace_removes_worktree(tmp_path, stub_runner):

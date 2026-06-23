@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from swe_agent.cli import _git_run, cmd_apply, cmd_revert
+from swe_agent.cli import _git_run, cmd_apply, cmd_diff, cmd_revert
 
 
 def _init_git_repo(path: Path) -> None:
@@ -50,6 +50,21 @@ def test_cmd_apply_returns_failure_when_commit_fails(tmp_path, capsys):
     _init_git_repo(tmp_path)  # no pending changes
     ret = cmd_apply(_Args(tmp_path))
     assert ret == 1
+
+
+def test_cmd_diff_clean_repo_reports_no_changes(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    ret = cmd_diff(_Args(tmp_path))
+    assert ret == 0
+    assert "No pending changes" in capsys.readouterr().out
+
+
+def test_cmd_diff_non_repo_reports_error(tmp_path, capsys):
+    # tmp_path is NOT a git repo -> git diff fails; must not claim a clean tree.
+    ret = cmd_diff(_Args(tmp_path))
+    assert ret == 1
+    out = capsys.readouterr().out
+    assert "No pending changes" not in out
 
 
 def test_cmd_revert_refuses_without_force(tmp_path, capsys):

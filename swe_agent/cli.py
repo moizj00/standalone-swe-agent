@@ -111,6 +111,10 @@ def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""
     # Load project config (.agent/config.yaml)
     project_cfg = load_project_config(cwd)
     merge_into_args(args, project_cfg)
+    # Project config can set the provider, which arrives after the initial
+    # resolve_runtime_config in main(); re-resolve so a project-selected cloud
+    # provider gets its base_url/model/api_key instead of the Ollama defaults.
+    resolve_runtime_config(args)
 
     env = build_env_context(cwd)
     proj, proj_path = load_project_instructions(cwd)
@@ -543,8 +547,16 @@ def _resolve_cwd(args) -> Path:
 def cmd_diff(args) -> int:
     """Show uncommitted changes (git diff + git diff --staged)."""
     cwd = _resolve_cwd(args)
-    staged = _git_run(cwd, ["diff", "--staged"]).stdout.strip()
-    unstaged = _git_run(cwd, ["diff"]).stdout.strip()
+    staged_res = _git_run(cwd, ["diff", "--staged"])
+    unstaged_res = _git_run(cwd, ["diff"])
+    if not staged_res.ok or not unstaged_res.ok:
+        # e.g. not a git repo, or git missing -- report honestly instead of
+        # silently claiming a clean tree.
+        msg = (staged_res.stderr or unstaged_res.stderr).strip()
+        print(msg or "git diff failed.")
+        return 1
+    staged = staged_res.stdout.strip()
+    unstaged = unstaged_res.stdout.strip()
     if staged:
         print("=== Staged ===")
         print(staged)
@@ -672,8 +684,9 @@ def _auto_create_branch(cwd: Path, task: str) -> None:
     branch = f"agent/{slug}-{timestamp}"
     res = _git_run(cwd, ["checkout", "-b", branch])
     if not res.ok:
-        # non-fatal: agent can still work on the current branch
-        print(f"(could not auto-create branch {branch}: {res.stderr.strip()})")
+        # non-fatal: agent can still work on the current branch. Write to stderr so
+        # `--json` runs keep stdout valid JSON for headless/CI consumers.
+        print(f"(could not auto-create branch {branch}: {res.stderr.strip()})", file=sys.stderr)
 
 
 def _emit_json_report(cwd: Path, result: str, session_id: str) -> None:
