@@ -105,16 +105,36 @@ def resolve_runtime_config(args) -> None:
 
 # --------------------------------------------------------------------------- build
 
+def _apply_project_config(args) -> "ProjectConfig":
+    """Merge .agent/config.yaml into args and mark merged values as consumed.
+
+    Flipping the ``_*_defaulted`` flags off for values the project supplied means a
+    second ``merge_into_args`` (in build_agent) won't re-apply them over a value that
+    a later step (e.g. the Ollama preflight resolving an unavailable model to a
+    fallback) has since computed.
+    """
+    cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+    cfg = load_project_config(cwd)
+    merge_into_args(args, cfg)
+    if cfg.model is not None:
+        args._model_defaulted = False
+    if cfg.provider is not None:
+        args._provider_defaulted = False
+    if cfg.temperature is not None:
+        args._temp_defaulted = False
+    if cfg.max_steps is not None:
+        args._steps_defaulted = False
+    return cfg
+
+
 def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""):
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
 
-    # Load project config (.agent/config.yaml)
+    # Project config was already merged + resolved in main() before the preflight;
+    # load it again here only for its metadata (path scope, source banner). The merge
+    # is a no-op for values main() already consumed.
     project_cfg = load_project_config(cwd)
     merge_into_args(args, project_cfg)
-    # Project config can set the provider, which arrives after the initial
-    # resolve_runtime_config in main(); re-resolve so a project-selected cloud
-    # provider gets its base_url/model/api_key instead of the Ollama defaults.
-    resolve_runtime_config(args)
 
     env = build_env_context(cwd)
     proj, proj_path = load_project_instructions(cwd)
@@ -383,6 +403,11 @@ def main(argv=None):
             pass
 
     args = parse_args(argv)
+    # Apply project config (.agent/config.yaml) BEFORE resolving runtime config, so a
+    # project-selected provider/model takes precedence over environment defaults and is
+    # resolved exactly once. Merged values are marked consumed so the later merge in
+    # build_agent cannot clobber a CLI flag or a preflight-resolved model.
+    _apply_project_config(args)
     resolve_runtime_config(args)
 
     # Subcommand dispatch (these exit early without spinning up an agent)
@@ -418,12 +443,6 @@ def main(argv=None):
             approval = ApprovalMode.YOLO
 
     if not mock and not args.no_preflight:
-        # Project config (.agent/config.yaml) can select the provider; apply it
-        # before the preflight so we validate/resolve the provider the agent will
-        # actually use (build_agent re-applies this idempotently).
-        _pf_cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
-        merge_into_args(args, load_project_config(_pf_cwd))
-        resolve_runtime_config(args)
         if is_cloud_provider(args.provider):
             ok, msg = check_cloud_provider(args.provider)
             if not ok:
