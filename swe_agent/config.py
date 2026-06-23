@@ -11,7 +11,9 @@ from pathlib import Path
 
 # ----- Provider selection ---------------------------------------------------
 # ollama | minimax | kimi | nemotron | openai
-DEFAULT_PROVIDER = os.environ.get("SWE_AGENT_PROVIDER", "nemotron").lower()
+# Default to the local Ollama backend; cloud providers stay reachable via the
+# --provider flag or the SWE_AGENT_PROVIDER env var.
+DEFAULT_PROVIDER = os.environ.get("SWE_AGENT_PROVIDER", "ollama").lower()
 
 # ----- Ollama transport -----------------------------------------------------
 # NOTE: this is the NATIVE Ollama endpoint base (no trailing /v1). We use
