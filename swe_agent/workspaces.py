@@ -40,6 +40,11 @@ def is_git_repo(cwd: Path) -> bool:
 def create_subagent_worktree(root: Path, subagent_id: str) -> Path:
     """Create a detached git worktree at ``root/.agent/worktrees/<subagent_id>``.
 
+    The worktree is forked from ``HEAD``, so it reflects the last commit and NOT
+    the parent's uncommitted/staged/untracked changes -- this keeps the child on a
+    clean, isolated base. Seeding the parent's in-progress changes is intentionally
+    out of scope.
+
     Raises RuntimeError if git is unavailable or the worktree cannot be created
     (e.g. the repo has no commits yet, so HEAD does not resolve).
     """

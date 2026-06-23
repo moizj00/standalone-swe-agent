@@ -145,6 +145,11 @@ Sub-agents have **completely private context**. They never leak their full histo
 - Parent only receives: "spawned id=xxx" immediately, then the summary via get_subagent_result.
 - This prevents context bloat while enabling true parallel work (e.g., explore different modules simultaneously).
 
+**Known limitations (this pass):**
+- Mutating (`implement`/`test`) sub-agents run in a git worktree forked from `HEAD`, so they do **not** see the parent's uncommitted/staged/untracked changes — they work from a clean committed base. Seeding in-progress parent changes is a later step.
+- `spawn_subagent` is treated as a mutating/exec tool, so it is blocked under read-only (`--plan`) approval. Read-only `audit`/`review` sub-agents are therefore only spawnable from a non-read-only parent; relaxing this is a follow-up.
+- Adopting a mutating sub-agent's diff into the parent tree is a deliberate, separate step (not automatic).
+
 Example usage in agent:
 ```
 Spawn several sub-agents for different parts of the codebase, then collect summaries.

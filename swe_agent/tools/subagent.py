@@ -14,6 +14,15 @@ Mutating modes are refused when the parent is read-only. A mutating sub-agent's
 changes can be inspected via get_subagent_diff and thrown away via
 discard_subagent_workspace; adopting them into the parent tree is a deliberate,
 separate step that this module does not perform automatically.
+
+Known limitations (intentional for this pass):
+  - spawn_subagent is registered mutating/exec, so Agent._gate blocks it entirely
+    in READ_ONLY mode. Read-only (audit/review) sub-agents are therefore only
+    reachable from a non-read-only parent, not under --plan or the server's
+    read-only default. Relaxing the gate is deferred to a follow-up.
+  - Mutating worktrees are forked from HEAD, so a child does not see the parent's
+    uncommitted/staged/untracked changes. This keeps the child isolated on a clean
+    committed base; seeding parent changes is out of scope for this pass.
 """
 from __future__ import annotations
 
