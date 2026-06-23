@@ -222,3 +222,18 @@ def test_discard_subagent_workspace_removes_worktree(tmp_path, stub_runner):
     listed = subprocess.run(["git", "worktree", "list"], cwd=str(tmp_path),
                             capture_output=True, text=True)
     assert str(ws) not in listed.stdout
+
+
+def test_discard_keeps_workspace_when_removal_fails(tmp_path, stub_runner, monkeypatch):
+    _init_git_repo(tmp_path)
+    ctx = _ctx(tmp_path)
+    sub.spawn_subagent(ctx, "do work", "impl", mode="implement")
+    _wait_done()
+    rec = _only_record()
+    # Simulate a failed removal (e.g. git worktree remove timed out).
+    monkeypatch.setattr(sub, "remove_subagent_worktree",
+                        lambda root, ws: "Error: git worktree remove timed out")
+    out = sub.discard_subagent_workspace(ctx, rec.id)
+    assert out.startswith("Error:")
+    # Workspace reference is retained so it can be discarded again later.
+    assert rec.workspace is not None

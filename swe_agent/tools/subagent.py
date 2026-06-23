@@ -197,7 +197,10 @@ def discard_subagent_workspace(ctx: ToolContext, subagent_id: str) -> str:
                 f"Discarding now would delete the directory it is working in. Wait for "
                 f"get_subagent_result to report completion first.")
     status = remove_subagent_worktree(Path(record.parent_cwd), Path(record.workspace))
-    record.workspace = None
+    # Only forget the workspace if removal actually succeeded; otherwise keep the
+    # reference so the orphaned worktree can be discarded again later.
+    if not status.startswith("Error:"):
+        record.workspace = None
     return status
 
 

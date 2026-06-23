@@ -418,6 +418,12 @@ def main(argv=None):
             approval = ApprovalMode.YOLO
 
     if not mock and not args.no_preflight:
+        # Project config (.agent/config.yaml) can select the provider; apply it
+        # before the preflight so we validate/resolve the provider the agent will
+        # actually use (build_agent re-applies this idempotently).
+        _pf_cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+        merge_into_args(args, load_project_config(_pf_cwd))
+        resolve_runtime_config(args)
         if is_cloud_provider(args.provider):
             ok, msg = check_cloud_provider(args.provider)
             if not ok:
