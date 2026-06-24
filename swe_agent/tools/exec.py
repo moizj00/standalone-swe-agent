@@ -51,6 +51,11 @@ _DANGER_PATTERNS = [
     (r"\bbcdedit\b", "boot configuration edit"),
     (r"(curl|wget)\s+[^\n|]*\|\s*(sudo\s+)?(sh|bash)\b", "pipe download to shell"),
     (r"(iwr|invoke-webrequest)\b[^\n|]*\|\s*iex\b", "powershell pipe to exec"),
+    # recursive world-writable chmod, any flag/mode order, short -R or long --recursive
+    (r"\bchmod\b(?=[^\n]*(?:\s-[a-zA-Z]*R|\s--recursive\b))(?=[^\n]*\b[0-7]?777\b)", "recursive world-writable chmod"),
+    (r">\s*/etc/", "overwrite of system config under /etc"),
+    # sudo (with any options/operands, up to a command separator) before a destructive verb
+    (r"\bsudo\b[^\n;&|]*\b(rm|dd|mkfs|chmod|chown|tee|truncate)(?=\s|$)", "privileged destructive command"),
 ]
 
 

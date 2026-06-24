@@ -105,16 +105,36 @@ def resolve_runtime_config(args) -> None:
 
 # --------------------------------------------------------------------------- build
 
+def _apply_project_config(args) -> "ProjectConfig":
+    """Merge .agent/config.yaml into args and mark merged values as consumed.
+
+    Flipping the ``_*_defaulted`` flags off for values the project supplied means a
+    second ``merge_into_args`` (in build_agent) won't re-apply them over a value that
+    a later step (e.g. the Ollama preflight resolving an unavailable model to a
+    fallback) has since computed.
+    """
+    cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+    cfg = load_project_config(cwd)
+    merge_into_args(args, cfg)
+    if cfg.model is not None:
+        args._model_defaulted = False
+    if cfg.provider is not None:
+        args._provider_defaulted = False
+    if cfg.temperature is not None:
+        args._temp_defaulted = False
+    if cfg.max_steps is not None:
+        args._steps_defaulted = False
+    return cfg
+
+
 def build_agent(args, approval: ApprovalMode, mock=None, original_task: str = ""):
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
 
-    # Load project config (.agent/config.yaml)
+    # Project config was already merged + resolved in main() before the preflight;
+    # load it again here only for its metadata (path scope, source banner). The merge
+    # is a no-op for values main() already consumed.
     project_cfg = load_project_config(cwd)
     merge_into_args(args, project_cfg)
-    # Project config can set the provider, which arrives after the initial
-    # resolve_runtime_config in main(); re-resolve so a project-selected cloud
-    # provider gets its base_url/model/api_key instead of the Ollama defaults.
-    resolve_runtime_config(args)
 
     env = build_env_context(cwd)
     proj, proj_path = load_project_instructions(cwd)
@@ -355,6 +375,8 @@ def parse_args(argv=None):
     p.add_argument("--revert", action="store_true", help="Discard all uncommitted changes, then exit (requires --force)")
     p.add_argument("--force", action="store_true",
                    help="Confirm destructive operations such as --revert")
+    p.add_argument("--gc-worktrees", action="store_true",
+                   help="Remove orphaned sub-agent worktrees under .agent/worktrees, then exit")
     p.add_argument("--test", action="store_true", dest="run_test",
                    help="Run configured test command and exit")
     p.add_argument("--config-get", metavar="KEY", default=None,
@@ -383,6 +405,11 @@ def main(argv=None):
             pass
 
     args = parse_args(argv)
+    # Apply project config (.agent/config.yaml) BEFORE resolving runtime config, so a
+    # project-selected provider/model takes precedence over environment defaults and is
+    # resolved exactly once. Merged values are marked consumed so the later merge in
+    # build_agent cannot clobber a CLI flag or a preflight-resolved model.
+    _apply_project_config(args)
     resolve_runtime_config(args)
 
     # Subcommand dispatch (these exit early without spinning up an agent)
@@ -392,6 +419,8 @@ def main(argv=None):
         return cmd_apply(args)
     if args.revert:
         return cmd_revert(args)
+    if args.gc_worktrees:
+        return cmd_gc_worktrees(args)
     if args.run_test:
         return cmd_test(args)
     if args.config_get:
@@ -596,6 +625,15 @@ def cmd_revert(args) -> int:
         return 1
     print("All uncommitted changes reverted.")
     return 0
+
+
+def cmd_gc_worktrees(args) -> int:
+    """Remove orphaned sub-agent worktrees left under .agent/worktrees."""
+    from .workspaces import prune_stale_worktrees
+    cwd = _resolve_cwd(args)
+    out = prune_stale_worktrees(cwd)
+    print(out)
+    return 1 if out.startswith("Error:") else 0
 
 
 def cmd_test(args) -> int:

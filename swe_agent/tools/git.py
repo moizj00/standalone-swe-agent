@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 from .base import ToolContext, ToolSpec, register
 
@@ -86,10 +87,46 @@ def git_commit(ctx: ToolContext, message: str, cwd: Optional[str] = None) -> str
     return out or "Committed."
 
 
+def _patch_target_paths(patch: str) -> List[str]:
+    """Extract the file paths a unified diff would touch (for confinement checks)."""
+    paths: List[str] = []
+    for line in patch.splitlines():
+        for prefix in ("+++ ", "--- "):
+            if line.startswith(prefix):
+                p = line[len(prefix):].split("\t", 1)[0].strip()
+                if p in ("", "/dev/null"):
+                    continue
+                if p[:2] in ("a/", "b/"):
+                    p = p[2:]
+                paths.append(p)
+        for kw in ("rename from ", "rename to ", "copy from ", "copy to "):
+            if line.startswith(kw):
+                paths.append(line[len(kw):].strip())
+    return paths
+
+
+def _escapes_workspace(workdir: str, base: Path, rel: str) -> bool:
+    """True if applying ``rel`` (relative to workdir) would land outside ``base``."""
+    target = (Path(workdir) / rel).resolve()
+    return target != base and base not in target.parents
+
+
 def apply_patch(ctx: ToolContext, patch: str, path: Optional[str] = None) -> str:
     workdir = str(ctx.resolve(path)) if path else str(ctx.cwd)
     if not patch.endswith("\n"):
         patch += "\n"
+
+    confined = getattr(ctx, "confine", False)
+    if confined:
+        # Reject patches that would write outside the workspace before running any
+        # tool. `git apply` rejects escaping paths itself, but this also covers the
+        # `patch -p1` fallback (skipped below in confined mode) and absolute targets.
+        base = ctx.cwd.resolve()
+        for rel in _patch_target_paths(patch):
+            if Path(rel).is_absolute() or _escapes_workspace(workdir, base, rel):
+                return (f"Error: patch refused (confined mode): target '{rel}' escapes the "
+                        f"workspace ({base}).")
+
     try:
         res = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=workdir,
                              input=patch, capture_output=True, text=True,
@@ -100,6 +137,11 @@ def apply_patch(ctx: ToolContext, patch: str, path: Optional[str] = None) -> str
         return "Error: git apply timed out"
     if res.returncode == 0:
         return "Patch applied successfully (git apply)."
+
+    if confined:
+        # Do not fall back to `patch -p1` in confined mode: unlike `git apply` it does
+        # not refuse paths that traverse outside the work tree.
+        return f"Patch failed (git apply):\n{res.stderr.strip()}"
 
     patchbin = shutil.which("patch")
     if patchbin:

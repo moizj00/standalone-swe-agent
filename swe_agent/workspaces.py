@@ -40,6 +40,11 @@ def is_git_repo(cwd: Path) -> bool:
 def create_subagent_worktree(root: Path, subagent_id: str) -> Path:
     """Create a detached git worktree at ``root/.agent/worktrees/<subagent_id>``.
 
+    The worktree is forked from ``HEAD``, so it reflects the last commit and NOT
+    the parent's uncommitted/staged/untracked changes -- this keeps the child on a
+    clean, isolated base. Seeding the parent's in-progress changes is intentionally
+    out of scope.
+
     Raises RuntimeError if git is unavailable or the worktree cannot be created
     (e.g. the repo has no commits yet, so HEAD does not resolve).
     """
@@ -91,6 +96,60 @@ def collect_worktree_diff(workspace: Path) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return f"Error collecting diff: {e}"
     return res.stdout or ""
+
+
+def list_registered_worktrees(root: Path):
+    """Absolute paths of all worktrees git tracks for ``root``, or None on failure.
+
+    Returning None (not an empty set) on a git error lets callers refuse to treat
+    "git failed" as "nothing is registered" -- which would otherwise make every
+    directory look stale.
+    """
+    try:
+        res = _git(["worktree", "list", "--porcelain"], Path(root))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    paths = set()
+    for line in (res.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            paths.add(str(Path(line[len("worktree "):].strip()).resolve()))
+    return paths
+
+
+def prune_stale_worktrees(root: Path) -> str:
+    """Remove orphaned sub-agent worktree directories left by crashed/abandoned runs.
+
+    Runs ``git worktree prune`` (drops registrations whose dirs are gone), then
+    deletes any directory under ``.agent/worktrees`` that git no longer tracks.
+    Refuses to delete anything if ``root`` is not a git repo or the worktree
+    listing fails -- otherwise an empty registered-set would make every directory
+    look stale and wipe live worktrees / unrelated data.
+    """
+    root = Path(root)
+    if not is_git_repo(root):
+        return "Error: not a git repository; refusing to prune worktrees."
+    container = root / WORKTREE_SUBDIR
+    try:
+        _git(["worktree", "prune"], root)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "Error: git unavailable; cannot prune worktrees."
+    registered = list_registered_worktrees(root)
+    if registered is None:
+        return "Error: could not list git worktrees; refusing to prune."
+    if not container.exists():
+        return "No worktrees directory; nothing to prune."
+    removed = []
+    for child in sorted(container.iterdir()):
+        if not child.is_dir():
+            continue  # skip the .gitignore marker
+        if str(child.resolve()) not in registered:
+            shutil.rmtree(child, ignore_errors=True)
+            removed.append(child.name)
+    if not removed:
+        return "No stale worktrees to prune."
+    return f"Pruned {len(removed)} stale worktree(s): {', '.join(removed)}"
 
 
 def remove_subagent_worktree(root: Path, workspace: Path) -> str:
