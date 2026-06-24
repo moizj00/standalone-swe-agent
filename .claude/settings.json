@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(find /home/moizjmj -type f \\\\\\( -name \"Dockerfile*\" -o -name \"*.dockerfile\" -o -name \".dockerignore\" -o -name \"docker-compose*.yml\" -o -name \"docker-compose*.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" -o -name \"*entrypoint*.sh\" -o -name \"docker-entrypoint*\" \\\\\\) 2>/dev/null | head -50)",
-      "Read(//home/moizjmj/**)"
+      "Read(//home/moizjmj/**)",
+      "Read(//mnt/c/Users/moizjmj/standalone-swe-agent/**)",
+      "Bash(DOCKER_BUILDKIT=1 docker build -t swe-coding-agent:test .)"
+    ],
+    "additionalDirectories": [
+      "/mnt/c/Users/moizjmj/standalone-swe-agent"
     ]
   }
 }
