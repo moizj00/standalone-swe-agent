@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/moizjmj -type f \\\\\\( -name \"Dockerfile*\" -o -name \"*.dockerfile\" -o -name \".dockerignore\" -o -name \"docker-compose*.yml\" -o -name \"docker-compose*.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" -o -name \"*entrypoint*.sh\" -o -name \"docker-entrypoint*\" \\\\\\) 2>/dev/null | head -50)",
+      "Read(//home/moizjmj/**)"
+    ]
+  }
+}
