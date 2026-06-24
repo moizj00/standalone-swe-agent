@@ -8,7 +8,9 @@
       "Bash(git rev-list *)",
       "Bash(echo \"=== Claude Code config dir ===\" && ls -la /mnt/c/home/moizjmj/.claude/ 2>&1 | head -40; echo \"=== ~/.claude \\(linux home\\) ===\" && ls -la ~/.claude/ 2>&1 | head -40)",
       "Read(//mnt/c/Users/moizjmj/.claude/**)",
-      "Bash(echo \"=== search for plugin-creator ===\" && find /home/moizjmj /mnt/c/home/moizjmj/.claude -maxdepth 4 -iname '*plugin-creator*' 2>/dev/null | head -20; echo \"=== search for a 'plugins' config / marketplaces ===\" && find /mnt/c/home/moizjmj/.claude ~/.claude -maxdepth 3 -iname '*plugin*' 2>/dev/null | head -30)"
+      "Bash(echo \"=== search for plugin-creator ===\" && find /home/moizjmj /mnt/c/home/moizjmj/.claude -maxdepth 4 -iname '*plugin-creator*' 2>/dev/null | head -20; echo \"=== search for a 'plugins' config / marketplaces ===\" && find /mnt/c/home/moizjmj/.claude ~/.claude -maxdepth 3 -iname '*plugin*' 2>/dev/null | head -30)",
+      "Bash(claude --version)",
+      "Bash(claude plugin *)"
     ],
     "additionalDirectories": [
       "/mnt/c/Users/moizjmj/standalone-swe-agent"
