@@ -7,6 +7,7 @@ runs exactly as in production.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import subprocess
 import threading
 from pathlib import Path
@@ -222,6 +223,55 @@ def test_discard_subagent_workspace_removes_worktree(tmp_path, stub_runner):
     listed = subprocess.run(["git", "worktree", "list"], cwd=str(tmp_path),
                             capture_output=True, text=True)
     assert str(ws) not in listed.stdout
+
+
+def _done_future(val="ok"):
+    f = concurrent.futures.Future()
+    f.set_result(val)
+    return f
+
+
+def test_registry_evicts_old_finished_records(monkeypatch):
+    sub._SUBAGENTS.clear()
+    monkeypatch.setattr(sub, "_MAX_TRACKED", 3)
+    for i in range(6):
+        sid = f"id{i}"
+        sub._SUBAGENTS[sid] = sub.SubagentRecord(
+            id=sid, description="d", mode="audit", parent_cwd="/x",
+            workspace=None, future=_done_future())
+        sub._prune_tracked()
+    assert len(sub._SUBAGENTS) <= 3
+
+
+def test_registry_keeps_records_holding_a_worktree(monkeypatch):
+    sub._SUBAGENTS.clear()
+    monkeypatch.setattr(sub, "_MAX_TRACKED", 1)
+    for i in range(4):
+        sid = f"w{i}"
+        sub._SUBAGENTS[sid] = sub.SubagentRecord(
+            id=sid, description="d", mode="implement", parent_cwd="/x",
+            workspace=f"/ws/{i}", future=_done_future())
+        sub._prune_tracked()
+    # None evictable: every record still owns a worktree (a diff may be wanted).
+    assert len(sub._SUBAGENTS) == 4
+
+
+def test_prune_stale_worktrees_removes_orphans_keeps_live(tmp_path, stub_runner):
+    from swe_agent.workspaces import create_subagent_worktree, prune_stale_worktrees
+    _init_git_repo(tmp_path)
+    (tmp_path / "readme.txt").write_text("hi", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "i"], cwd=str(tmp_path), capture_output=True)
+
+    live = create_subagent_worktree(tmp_path, "live")
+    orphan = tmp_path / WORKTREE_SUBDIR / "orphan"
+    orphan.mkdir()
+    (orphan / "f.txt").write_text("junk", encoding="utf-8")
+
+    out = prune_stale_worktrees(tmp_path)
+    assert "orphan" in out
+    assert not orphan.exists()
+    assert live.exists()  # registered worktree is preserved
 
 
 def test_discard_keeps_workspace_when_removal_fails(tmp_path, stub_runner, monkeypatch):

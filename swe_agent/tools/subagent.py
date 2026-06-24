@@ -80,6 +80,22 @@ class SubagentRecord:
 # sub_id -> SubagentRecord
 _SUBAGENTS: dict[str, SubagentRecord] = {}
 
+# Cap on retained records so a long-lived server doesn't grow this map without
+# bound. Only finished records that hold no worktree are evictable -- anything
+# running, or still owning a worktree (a diff a caller may want), is kept.
+_MAX_TRACKED = 256
+
+
+def _prune_tracked() -> None:
+    if len(_SUBAGENTS) <= _MAX_TRACKED:
+        return
+    for sid in list(_SUBAGENTS.keys()):  # insertion order = oldest first
+        if len(_SUBAGENTS) <= _MAX_TRACKED:
+            break
+        rec = _SUBAGENTS[sid]
+        if rec.status in ("done", "failed") and not rec.has_workspace:
+            del _SUBAGENTS[sid]
+
 
 def _refresh(record: SubagentRecord) -> None:
     """Populate summary/error from the future once it has completed."""
@@ -145,6 +161,7 @@ def spawn_subagent(ctx: ToolContext, task: str, description: str,
         id=sub_id, description=description, mode=mode,
         parent_cwd=parent_cwd, workspace=workspace, future=fut,
     )
+    _prune_tracked()
     where = f" in isolated worktree {workspace}" if workspace else ""
     return (f"Spawned {mode} sub-agent {sub_id} ('{description}'){where}, running in parallel. "
             f"Call get_subagent_result(subagent_id='{sub_id}') to collect its summary.")

@@ -375,6 +375,8 @@ def parse_args(argv=None):
     p.add_argument("--revert", action="store_true", help="Discard all uncommitted changes, then exit (requires --force)")
     p.add_argument("--force", action="store_true",
                    help="Confirm destructive operations such as --revert")
+    p.add_argument("--gc-worktrees", action="store_true",
+                   help="Remove orphaned sub-agent worktrees under .agent/worktrees, then exit")
     p.add_argument("--test", action="store_true", dest="run_test",
                    help="Run configured test command and exit")
     p.add_argument("--config-get", metavar="KEY", default=None,
@@ -417,6 +419,8 @@ def main(argv=None):
         return cmd_apply(args)
     if args.revert:
         return cmd_revert(args)
+    if args.gc_worktrees:
+        return cmd_gc_worktrees(args)
     if args.run_test:
         return cmd_test(args)
     if args.config_get:
@@ -620,6 +624,14 @@ def cmd_revert(args) -> int:
         print(msg or "Revert failed.")
         return 1
     print("All uncommitted changes reverted.")
+    return 0
+
+
+def cmd_gc_worktrees(args) -> int:
+    """Remove orphaned sub-agent worktrees left under .agent/worktrees."""
+    from .workspaces import prune_stale_worktrees
+    cwd = _resolve_cwd(args)
+    print(prune_stale_worktrees(cwd))
     return 0
 
 

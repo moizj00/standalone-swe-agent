@@ -94,7 +94,21 @@ def test_detect_danger_new_patterns():
     assert detect_danger("sudo rm /var/log/syslog") == "privileged destructive command"
 
 
+def test_detect_danger_chmod_recursive_either_order():
+    # GNU chmod accepts the -R flag before OR after the mode.
+    assert detect_danger("chmod 777 -R /srv") == "recursive world-writable chmod"
+    assert detect_danger("chmod -fR 0777 dir") == "recursive world-writable chmod"
+
+
+def test_detect_danger_sudo_with_flags_before_verb():
+    assert detect_danger("echo x | sudo -n tee /etc/cron.d/x") == "privileged destructive command"
+    assert detect_danger("sudo -E truncate -s 0 /etc/passwd") == "privileged destructive command"
+    assert detect_danger("sudo FOO=1 chown -R root:root /etc") == "privileged destructive command"
+
+
 def test_detect_danger_allows_normal_commands():
     assert detect_danger("npm run build") is None
     assert detect_danger("git status") is None
     assert detect_danger("chmod 644 file.txt") is None
+    assert detect_danger("chmod -R 755 dir") is None  # recursive but not world-writable
+    assert detect_danger("sudo apt-get install ripgrep") is None  # not a destructive verb

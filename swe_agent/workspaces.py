@@ -98,6 +98,47 @@ def collect_worktree_diff(workspace: Path) -> str:
     return res.stdout or ""
 
 
+def list_registered_worktrees(root: Path) -> set:
+    """Absolute paths of all worktrees git currently tracks for ``root``."""
+    try:
+        res = _git(["worktree", "list", "--porcelain"], Path(root))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return set()
+    paths = set()
+    for line in (res.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            paths.add(str(Path(line[len("worktree "):].strip()).resolve()))
+    return paths
+
+
+def prune_stale_worktrees(root: Path) -> str:
+    """Remove orphaned sub-agent worktree directories left by crashed/abandoned runs.
+
+    Runs ``git worktree prune`` (drops registrations whose dirs are gone), then
+    deletes any directory under ``.agent/worktrees`` that git no longer tracks.
+    Live, registered worktrees are left untouched.
+    """
+    root = Path(root)
+    container = root / WORKTREE_SUBDIR
+    try:
+        _git(["worktree", "prune"], root)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "Error: git unavailable; cannot prune worktrees."
+    if not container.exists():
+        return "No worktrees directory; nothing to prune."
+    registered = list_registered_worktrees(root)
+    removed = []
+    for child in sorted(container.iterdir()):
+        if not child.is_dir():
+            continue  # skip the .gitignore marker
+        if str(child.resolve()) not in registered:
+            shutil.rmtree(child, ignore_errors=True)
+            removed.append(child.name)
+    if not removed:
+        return "No stale worktrees to prune."
+    return f"Pruned {len(removed)} stale worktree(s): {', '.join(removed)}"
+
+
 def remove_subagent_worktree(root: Path, workspace: Path) -> str:
     """Remove a sub-agent worktree and prune git's bookkeeping.
 
