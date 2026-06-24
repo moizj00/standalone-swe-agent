@@ -274,6 +274,18 @@ def test_prune_stale_worktrees_removes_orphans_keeps_live(tmp_path, stub_runner)
     assert live.exists()  # registered worktree is preserved
 
 
+def test_prune_stale_worktrees_refuses_outside_git_repo(tmp_path):
+    from swe_agent.workspaces import prune_stale_worktrees
+    # NOT a git repo, but a populated .agent/worktrees -- must not be wiped.
+    wt = tmp_path / WORKTREE_SUBDIR / "data"
+    wt.mkdir(parents=True)
+    (wt / "important.txt").write_text("keep me", encoding="utf-8")
+    out = prune_stale_worktrees(tmp_path)
+    assert out.startswith("Error:")
+    assert wt.exists()
+    assert (wt / "important.txt").read_text(encoding="utf-8") == "keep me"
+
+
 def test_discard_keeps_workspace_when_removal_fails(tmp_path, stub_runner, monkeypatch):
     _init_git_repo(tmp_path)
     ctx = _ctx(tmp_path)

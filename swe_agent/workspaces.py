@@ -98,12 +98,19 @@ def collect_worktree_diff(workspace: Path) -> str:
     return res.stdout or ""
 
 
-def list_registered_worktrees(root: Path) -> set:
-    """Absolute paths of all worktrees git currently tracks for ``root``."""
+def list_registered_worktrees(root: Path):
+    """Absolute paths of all worktrees git tracks for ``root``, or None on failure.
+
+    Returning None (not an empty set) on a git error lets callers refuse to treat
+    "git failed" as "nothing is registered" -- which would otherwise make every
+    directory look stale.
+    """
     try:
         res = _git(["worktree", "list", "--porcelain"], Path(root))
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return set()
+        return None
+    if res.returncode != 0:
+        return None
     paths = set()
     for line in (res.stdout or "").splitlines():
         if line.startswith("worktree "):
@@ -116,17 +123,23 @@ def prune_stale_worktrees(root: Path) -> str:
 
     Runs ``git worktree prune`` (drops registrations whose dirs are gone), then
     deletes any directory under ``.agent/worktrees`` that git no longer tracks.
-    Live, registered worktrees are left untouched.
+    Refuses to delete anything if ``root`` is not a git repo or the worktree
+    listing fails -- otherwise an empty registered-set would make every directory
+    look stale and wipe live worktrees / unrelated data.
     """
     root = Path(root)
+    if not is_git_repo(root):
+        return "Error: not a git repository; refusing to prune worktrees."
     container = root / WORKTREE_SUBDIR
     try:
         _git(["worktree", "prune"], root)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "Error: git unavailable; cannot prune worktrees."
+    registered = list_registered_worktrees(root)
+    if registered is None:
+        return "Error: could not list git worktrees; refusing to prune."
     if not container.exists():
         return "No worktrees directory; nothing to prune."
-    registered = list_registered_worktrees(root)
     removed = []
     for child in sorted(container.iterdir()):
         if not child.is_dir():

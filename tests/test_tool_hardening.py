@@ -94,16 +94,26 @@ def test_detect_danger_new_patterns():
     assert detect_danger("sudo rm /var/log/syslog") == "privileged destructive command"
 
 
-def test_detect_danger_chmod_recursive_either_order():
-    # GNU chmod accepts the -R flag before OR after the mode.
+def test_detect_danger_chmod_recursive_either_order_and_long_option():
+    # GNU chmod accepts -R before OR after the mode, and the long --recursive form.
     assert detect_danger("chmod 777 -R /srv") == "recursive world-writable chmod"
     assert detect_danger("chmod -fR 0777 dir") == "recursive world-writable chmod"
+    assert detect_danger("chmod --recursive 777 dir") == "recursive world-writable chmod"
+    assert detect_danger("chmod 777 --recursive dir") == "recursive world-writable chmod"
 
 
-def test_detect_danger_sudo_with_flags_before_verb():
+def test_detect_danger_sudo_with_flags_and_operands_before_verb():
     assert detect_danger("echo x | sudo -n tee /etc/cron.d/x") == "privileged destructive command"
     assert detect_danger("sudo -E truncate -s 0 /etc/passwd") == "privileged destructive command"
     assert detect_danger("sudo FOO=1 chown -R root:root /etc") == "privileged destructive command"
+    # options that take an operand, and --opt=value forms
+    assert detect_danger("sudo -u root rm /tmp/x") == "privileged destructive command"
+    assert detect_danger("sudo --user=root truncate -s 0 /etc/passwd") == "privileged destructive command"
+
+
+def test_detect_danger_sudo_no_false_positive_across_pipe():
+    # `tee` here is piped from sudo output, not itself privileged -> not flagged.
+    assert detect_danger("sudo systemctl status | tee run.log") is None
 
 
 def test_detect_danger_allows_normal_commands():

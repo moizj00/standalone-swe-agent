@@ -631,8 +631,9 @@ def cmd_gc_worktrees(args) -> int:
     """Remove orphaned sub-agent worktrees left under .agent/worktrees."""
     from .workspaces import prune_stale_worktrees
     cwd = _resolve_cwd(args)
-    print(prune_stale_worktrees(cwd))
-    return 0
+    out = prune_stale_worktrees(cwd)
+    print(out)
+    return 1 if out.startswith("Error:") else 0
 
 
 def cmd_test(args) -> int:
