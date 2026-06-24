@@ -1,8 +1,8 @@
 # standalone-swe-agent
 
- Standalone Python SWE agent with a React/Vite dashboard. The Python agent owns
- the CLI, tool loop, approvals, providers, HTTP/SSE bridge, and tests; `web/`
- is the dashboard proxy/UI.
+Standalone Python SWE agent with a React/Vite dashboard. The Python agent owns
+the CLI, tool loop, approvals, providers, HTTP/SSE bridge, and tests; `web/`
+is the dashboard proxy/UI.
 
 ## Commands
 
