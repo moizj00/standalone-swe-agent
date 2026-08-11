@@ -42,7 +42,7 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -50,12 +50,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 from . import llm, prompts
 from .agent import Agent
 from .config import (ApprovalMode, DEFAULT_MODEL, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_BASE,
-                     DEFAULT_TEMPERATURE, MAX_STEPS, SESSION_DIR)
+                     DEFAULT_PROVIDER, DEFAULT_TEMPERATURE, MAX_STEPS, SESSION_DIR)
 from .session import Session, build_env_context, load_project_instructions
 from .tools import ADVERTISED, TOOLS, VALID_NAMES
 from .tools.base import ToolContext
 from .tools.custom import build_toolspecs
 from .tools.exec import BackgroundRegistry
+from .providers import CLOUD_PROVIDER_NAMES, check_cloud_provider, get_provider, is_cloud_provider
 
 MAX_BODY = 16 * 1024 * 1024          # reject request bodies larger than this (413)
 SSE_SEND_TIMEOUT = 120               # seconds; a stalled SSE client surfaces as a socket error
@@ -78,8 +79,10 @@ class _HttpError(Exception):
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
+    provider: str = DEFAULT_PROVIDER
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_OLLAMA_BASE
+    api_key: str = ""
     num_ctx: int = DEFAULT_NUM_CTX
     temperature: float = DEFAULT_TEMPERATURE
     max_steps: int = MAX_STEPS
@@ -182,6 +185,7 @@ def default_agent_factory(config: ServerConfig, session_id: str) -> Agent:
     system = prompts.build_system_prompt(
         env_context=env, project_instructions=proj,
         plan_mode=(config.approval == ApprovalMode.READ_ONLY),
+        provider=config.provider,
     )
     ctx = ToolContext(
         cwd=cwd, approval=config.approval, approve_cb=_server_approval_cb,
@@ -193,6 +197,7 @@ def default_agent_factory(config: ServerConfig, session_id: str) -> Agent:
         model=config.model, ctx=ctx, system_prompt=system, stream=True,
         verbose=False, max_steps=config.max_steps, base_url=config.base_url,
         num_ctx=config.num_ctx, temperature=config.temperature,
+        provider=config.provider, api_key=config.api_key,
     )
 
 
@@ -205,7 +210,11 @@ class AgentRegistry:
         self._entries: Dict[str, dict] = {}
         self._guard = threading.Lock()
 
-    def get_or_create(self, session_id: Optional[str]) -> Tuple[str, dict, bool]:
+    def get_or_create(
+        self, session_id: Optional[str], *, provider: Optional[str] = None,
+        model: Optional[str] = None, base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> Tuple[str, dict, bool]:
         """Return (session_id, entry, created). entry = {agent, lock, session}.
 
         The heavy work (Session FS setup + agent construction, which shells out to
@@ -227,7 +236,16 @@ class AgentRegistry:
         else:
             session = None
             sid = session_id or _rand_id()
-        agent = self._factory(self.config, sid)
+        session_config = self.config
+        if any(value is not None for value in (provider, model, base_url, api_key)):
+            session_config = replace(
+                self.config,
+                provider=provider or self.config.provider,
+                model=model or self.config.model,
+                base_url=base_url or self.config.base_url,
+                api_key=api_key if api_key is not None else self.config.api_key,
+            )
+        agent = self._factory(session_config, sid)
         entry = {"agent": agent, "lock": threading.Lock(), "session": session}
 
         # Re-check under the lock: another thread may have created the same id.
@@ -393,7 +411,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/api/health":
             return self._send_json({
-                "status": "ok", "model": self.config.model,
+                "status": "ok", "provider": self.config.provider,
+                "model": self.config.model,
                 "approval": self.config.approval.value, "tools": len(ADVERTISED),
                 "cwd": str(Path(self.config.cwd).resolve()),
             })
@@ -425,6 +444,31 @@ class Handler(BaseHTTPRequestHandler):
         session_id = data.get("session_id")
         if session_id is not None and not (isinstance(session_id, str) and _SID_RE.match(session_id)):
             return self._send_json({"error": "invalid session_id"}, 400)
+
+        requested_provider = data.get("provider")
+        requested_model = data.get("model")
+        requested_base_url = data.get("base_url")
+        if requested_provider is not None:
+            if not isinstance(requested_provider, str):
+                return self._send_json({"error": "invalid provider"}, 400)
+            requested_provider = requested_provider.lower().strip()
+            if requested_provider != "ollama" and not is_cloud_provider(requested_provider):
+                return self._send_json({"error": f"unknown provider: {requested_provider}"}, 400)
+            if is_cloud_provider(requested_provider):
+                spec = get_provider(requested_provider)
+                api_key = spec.resolve_api_key() if spec else ""
+                if not api_key:
+                    ok, message = check_cloud_provider(requested_provider)
+                    return self._send_json({"error": message}, 503)
+            else:
+                api_key = ""
+        else:
+            api_key = self.config.api_key
+
+        if requested_model is not None and (not isinstance(requested_model, str) or not requested_model.strip()):
+            return self._send_json({"error": "invalid model"}, 400)
+        if requested_base_url is not None and (not isinstance(requested_base_url, str) or not requested_base_url.startswith(("http://", "https://"))):
+            return self._send_json({"error": "invalid base_url"}, 400)
         try:
             messages = translate_messages(data.get("messages") or [])
         except Exception as e:
@@ -446,7 +490,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(
                     {"error": "invalid custom_tools: " + "; ".join(cerrors[:5])}, 400)
 
-        sid, entry, created = self.registry.get_or_create(session_id)
+        sid, entry, created = self.registry.get_or_create(
+            session_id,
+            provider=requested_provider,
+            model=requested_model,
+            base_url=requested_base_url,
+            api_key=api_key,
+        )
 
         lock: threading.Lock = entry["lock"]
         if not lock.acquire(blocking=False):
@@ -456,8 +506,14 @@ class Handler(BaseHTTPRequestHandler):
             # Model override is applied only inside the lock (never on the 409 path),
             # so it can't switch models out from under another in-flight turn. It is
             # sticky for the session (and recorded in persisted meta) by design.
-            if data.get("model"):
-                entry["agent"].model = data["model"]
+            if requested_provider:
+                entry["agent"].provider = requested_provider
+                if is_cloud_provider(requested_provider):
+                    entry["agent"].api_key = api_key
+            if requested_model:
+                entry["agent"].model = requested_model
+            if requested_base_url:
+                entry["agent"].base_url = requested_base_url
             if raw_custom is not None:
                 entry["agent"].extra_tools = custom_specs
             try:
@@ -526,7 +582,10 @@ def serve(config: ServerConfig, *, preflight: bool = True, insecure: bool = Fals
         print(f"\033[31m{refusal}\033[0m\n  (override with --insecure if you understand the risk.)")
         return
     if preflight:
-        ok, msg = llm.check_server(config.base_url, config.model)
+        if is_cloud_provider(config.provider):
+            ok, msg = check_cloud_provider(config.provider)
+        else:
+            ok, msg = llm.check_server(config.base_url, config.model)
         if not ok:
             print(f"\033[31m{msg}\033[0m")
             return
@@ -534,7 +593,7 @@ def serve(config: ServerConfig, *, preflight: bool = True, insecure: bool = Fals
     host, port = httpd.server_address[0], httpd.server_address[1]
     tokeninfo = "token REQUIRED" if config.token else "\033[33mNO TOKEN (open on this host)\033[0m"
     print(f"\033[1mSWE agent server\033[0m on http://{host}:{port}  "
-          f"model={config.model} approval={config.approval.value} cwd={Path(config.cwd).resolve()}")
+          f"provider={config.provider} model={config.model} approval={config.approval.value} cwd={Path(config.cwd).resolve()}")
     print(f"  auth: {tokeninfo}   endpoints: /api/health /api/tools /api/chat /api/chat/stream")
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("  \033[31m⚠ bound to a non-loopback address; tools run real shell/file ops — "
@@ -562,6 +621,8 @@ def main(argv=None) -> int:
                                 description="HTTP/SSE bridge for the SWE agent.")
     p.add_argument("--host", default=os.environ.get("SWE_AGENT_SERVER_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("SWE_AGENT_SERVER_PORT", "8765")))
+    p.add_argument("--provider", default=DEFAULT_PROVIDER,
+                   choices=["ollama", *sorted(CLOUD_PROVIDER_NAMES)])
     p.add_argument("--model", "-m", default=DEFAULT_MODEL)
     p.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE)
     p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX)
@@ -581,8 +642,13 @@ def main(argv=None) -> int:
                         "(you accept the RCE/file-write exposure)")
     args = p.parse_args(argv)
 
+    default_api_key = ""
+    if args.provider != "ollama":
+        spec = get_provider(args.provider)
+        default_api_key = spec.resolve_api_key() if spec else ""
     config = ServerConfig(
-        host=args.host, port=args.port, model=args.model, base_url=args.base_url,
+        host=args.host, port=args.port, provider=args.provider, model=args.model,
+        base_url=args.base_url, api_key=default_api_key,
         num_ctx=args.num_ctx, temperature=args.temperature, max_steps=args.max_steps,
         cwd=Path(args.cwd).resolve() if args.cwd else Path.cwd(),
         approval=_approval_from(args.approval), token=args.token, persist=not args.no_persist,

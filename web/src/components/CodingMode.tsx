@@ -50,6 +50,9 @@ export const CodingMode = ({ conversationId, userId }: CodingModeProps = {}) => 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<Array<{ id: string; name: string; models: string[]; configured: boolean }>>([]);
+  const [provider, setProvider] = useState('ollama');
+  const [model, setModel] = useState('qwen2.5-coder:7b');
   const { schemas: customSchemas } = useToolSchemas();
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
 
@@ -104,6 +107,15 @@ export const CodingMode = ({ conversationId, userId }: CodingModeProps = {}) => 
   useEffect(() => {
     fetchTools();
     fetchVsCodeStatus();
+    fetch('/api/models')
+      .then(response => response.ok ? response.json() : null)
+      .then(data => {
+        if (!data?.providers) return;
+        setModelCatalog(data.providers);
+        if (data.active?.provider) setProvider(data.active.provider);
+        if (data.active?.model) setModel(data.active.model);
+      })
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -190,11 +202,13 @@ export const CodingMode = ({ conversationId, userId }: CodingModeProps = {}) => 
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: newMessages,
-          session_id: sessionId ?? undefined,
-          custom_tools: callableSchemas(customSchemas),
-        }),
+          body: JSON.stringify({
+            messages: newMessages,
+            session_id: sessionId ?? undefined,
+            provider,
+            model,
+            custom_tools: callableSchemas(customSchemas),
+          }),
       });
 
       if (!response.ok || !response.body) {
@@ -944,7 +958,27 @@ export const CodingMode = ({ conversationId, userId }: CodingModeProps = {}) => 
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-2 pr-1">
         <div>
            <h2 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">Coding Workspace Control Center</h2>
-           <p className="text-sm text-slate-500 dark:text-slate-400">Integrated bash terminal with dynamic Gemini Tool Schema planner and IDE adapters.</p>
+           <p className="text-sm text-slate-500 dark:text-slate-400">Integrated bash terminal with multi-model coding agents and IDE adapters.</p>
+        </div>
+        <div className="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 px-3 py-2 bg-white dark:bg-slate-900">
+          <Cpu className="h-4 w-4 text-indigo-500" />
+          <select
+            aria-label="Coding model"
+            value={`${provider}:${model}`}
+            onChange={event => {
+              const [nextProvider, ...modelParts] = event.target.value.split(':');
+              setProvider(nextProvider);
+              setModel(modelParts.join(':'));
+              setSessionId(null);
+            }}
+            className="bg-transparent text-sm font-medium text-slate-700 dark:text-slate-200 outline-none"
+          >
+            {modelCatalog.flatMap(item => item.models.map(itemModel => (
+              <option key={`${item.id}:${itemModel}`} value={`${item.id}:${itemModel}`}>
+                {item.name} · {itemModel}{item.configured ? '' : ' (not configured)'}
+              </option>
+            )))}
+          </select>
         </div>
       </div>
 

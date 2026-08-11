@@ -104,11 +104,12 @@ export function ConversationManager() {
       {/* Main Chat Area */}
       <main className="flex-1">
         {activeConversation && user ? (
-          <CodingMode
-            key={activeConversation.id}
-            conversationId={activeConversation.id}
-            userId={user.id}
-          />
+          <div key={activeConversation.id} className="h-full">
+            <CodingMode
+              conversationId={activeConversation.id}
+              userId={user.id}
+            />
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">

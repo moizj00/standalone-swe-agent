@@ -20,6 +20,16 @@ import { createServer as createViteServer } from 'vite';
  */
 const AGENT_SERVER_URL = (process.env.AGENT_SERVER_URL || 'http://127.0.0.1:8765').replace(/\/$/, '');
 const AGENT_TOKEN = process.env.SWE_AGENT_SERVER_TOKEN;
+const usage = new Map<string, { requests: number; errors: number; totalLatencyMs: number }>();
+
+function recordUsage(provider = 'ollama', model = 'unknown', error = false, latencyMs = 0) {
+  const key = `${provider}:${model}`;
+  const current = usage.get(key) || { requests: 0, errors: 0, totalLatencyMs: 0 };
+  current.requests += 1;
+  current.errors += error ? 1 : 0;
+  current.totalLatencyMs += latencyMs;
+  usage.set(key, current);
+}
 
 function agentHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const h: Record<string, string> = { ...extra };
@@ -269,10 +279,50 @@ async function startServer() {
     }
   });
 
+  // -- Model management ------------------------------------------------------
+  // Provider metadata is intentionally public; credentials remain server-side.
+  app.get('/api/models', async (_req, res) => {
+    try {
+      const upstream = await fetch(`${AGENT_SERVER_URL}/api/health`, { headers: agentHeaders() });
+      const health = await upstream.json().catch(() => ({}));
+      const providers = [
+        { id: 'ollama', name: 'Ollama', models: ['qwen2.5-coder:7b'], local: true, configured: true },
+        { id: 'openai', name: 'OpenAI', models: ['gpt-4.1-mini', 'gpt-4.1'], local: false, configured: Boolean(process.env.OPENAI_API_KEY) },
+        { id: 'minimax', name: 'MiniMax', models: ['MiniMax-M2.5'], local: false, configured: Boolean(process.env.MINIMAX_API_KEY) },
+        { id: 'kimi', name: 'Kimi', models: ['kimi-k2.7-code'], local: false, configured: Boolean(process.env.MOONSHOT_API_KEY || process.env.KIMI_API_KEY) },
+        { id: 'nemotron', name: 'NVIDIA Nemotron', models: ['nvidia/nemotron-4-340b-instruct'], local: false, configured: Boolean(process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY || process.env.NGC_API_KEY) },
+      ];
+      res.json({ providers, active: { provider: health.provider || 'ollama', model: health.model || null } });
+    } catch {
+      res.json({ providers: [], active: null, error: 'Agent server unavailable' });
+    }
+  });
+
+  app.get('/api/models/usage', (_req, res) => {
+    const rows = [...usage.entries()].map(([key, value]) => {
+      const [provider, ...modelParts] = key.split(':');
+      return { provider, model: modelParts.join(':'), ...value, averageLatencyMs: value.requests ? Math.round(value.totalLatencyMs / value.requests) : 0 };
+    });
+    res.json({ rows });
+  });
+
+  app.post('/api/models/test', async (req, res) => {
+    const { provider, model } = req.body || {};
+    if (typeof provider !== 'string' || typeof model !== 'string') return res.status(400).json({ error: 'provider and model are required' });
+    try {
+      const upstream = await fetch(`${AGENT_SERVER_URL}/api/health`, { headers: agentHeaders() });
+      const health = await upstream.json().catch(() => ({}));
+      res.json({ ok: upstream.ok, provider, model, active: health.provider === provider && health.model === model });
+    } catch (error: any) {
+      res.status(502).json({ ok: false, error: error.message });
+    }
+  });
+
   // -- Chat: proxy to the Python SWE agent ----------------------------------
 
   // Non-streaming, drop-in: returns { text, session_id }.
   app.post('/api/chat', async (req, res) => {
+    const startedAt = Date.now();
     try {
       const upstream = await fetch(`${AGENT_SERVER_URL}/api/chat`, {
         method: 'POST',
@@ -280,14 +330,18 @@ async function startServer() {
         body: JSON.stringify(req.body ?? {}),
       });
       const data = await upstream.json();
+      const latencyMs = Date.now() - startedAt;
+      recordUsage(req.body?.provider || 'ollama', req.body?.model || 'unknown', !upstream.ok, latencyMs);
       res.status(upstream.status).json(data);
     } catch (error: any) {
+      recordUsage(req.body?.provider || 'ollama', req.body?.model || 'unknown', true, Date.now() - startedAt);
       res.status(502).json({ error: `Agent server unreachable at ${AGENT_SERVER_URL}: ${error.message}` });
     }
   });
 
   // Streaming: pipe the agent's Server-Sent Events straight through to the browser.
   app.post('/api/chat/stream', async (req, res) => {
+    const startedAt = Date.now();
     let upstream: Response;
     try {
       upstream = await fetch(`${AGENT_SERVER_URL}/api/chat/stream`, {
@@ -324,6 +378,7 @@ async function startServer() {
       // event so the client shows a failure instead of silently truncating.
       try { res.write('data: ' + JSON.stringify({ type: 'error', message: 'agent stream interrupted' }) + '\n\n'); } catch {}
     }
+    recordUsage(req.body?.provider || 'ollama', req.body?.model || 'unknown', false, Date.now() - startedAt);
     res.end();
   });
 
