@@ -367,6 +367,7 @@ async function startServer() {
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     req.on('close', () => { reader.cancel().catch(() => {}); });
+    let interrupted = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -374,11 +375,12 @@ async function startServer() {
         res.write(decoder.decode(value, { stream: true }));
       }
     } catch {
+      interrupted = true;
       // Upstream broke mid-stream (Python reset/died). Surface it as an SSE error
       // event so the client shows a failure instead of silently truncating.
       try { res.write('data: ' + JSON.stringify({ type: 'error', message: 'agent stream interrupted' }) + '\n\n'); } catch {}
     }
-    recordUsage(req.body?.provider || 'ollama', req.body?.model || 'unknown', false, Date.now() - startedAt);
+    recordUsage(req.body?.provider || 'ollama', req.body?.model || 'unknown', interrupted, Date.now() - startedAt);
     res.end();
   });
 

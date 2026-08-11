@@ -175,10 +175,40 @@ def chat(messages: List[dict], model: str, tools: List[dict], *,
 
     if is_cloud_provider(provider):
         cloud = OpenAICompatibleProvider(model=model, base_url=base_url, api_key=api_key)
-        return cloud.chat(
-            messages, tools, temperature=temperature, stream=stream,
-            on_token=on_token, use_tools=use_tools,
-        )
+        try:
+            return cloud.chat(
+                messages, tools, temperature=temperature, stream=stream,
+                on_token=on_token, use_tools=use_tools,
+            )
+        except Exception as primary_error:
+            # Opt-in fallback chain. Keep credentials server-side and only retry
+            # before any streamed content has been emitted by the provider.
+            fallback_names = [name.strip().lower() for name in os.environ.get(
+                "SWE_AGENT_FALLBACK_PROVIDERS", ""
+            ).split(",") if name.strip()]
+            from .providers import get_provider
+            for fallback_name in fallback_names:
+                if fallback_name == provider or not is_cloud_provider(fallback_name):
+                    continue
+                spec = get_provider(fallback_name)
+                fallback_key = spec.resolve_api_key() if spec else ""
+                if not spec or not fallback_key:
+                    continue
+                try:
+                    fallback = OpenAICompatibleProvider(
+                        model=spec.default_model,
+                        base_url=spec.base_url,
+                        api_key=fallback_key,
+                    )
+                    return fallback.chat(
+                        messages, tools, temperature=temperature, stream=stream,
+                        on_token=on_token, use_tools=use_tools,
+                    )
+                except Exception:
+                    continue
+            raise RuntimeError(
+                f"{provider}/{model} failed and no configured fallback succeeded: {primary_error}"
+            ) from primary_error
 
     url = base_url.rstrip("/") + "/api/chat"
     payload = {

@@ -12,7 +12,28 @@ const getHeatmapColor = (count: number) => {
   return 'bg-emerald-600 dark:bg-emerald-500 text-white';
 };
 
+type UsageRow = {
+  provider: string;
+  model: string;
+  requests: number;
+  errors: number;
+  averageLatencyMs: number;
+};
+
 export const Analytics = () => {
+  const [usageRows, setUsageRows] = useState<UsageRow[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/models/usage')
+      .then(response => response.ok ? response.json() : null)
+      .then(data => {
+        if (active && Array.isArray(data?.rows)) setUsageRows(data.rows);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
   const handleDownloadCSV = () => {
     if (!mockProgress.length) return;
     const header = Object.keys(mockProgress[0]).join(',');
@@ -44,6 +65,35 @@ export const Analytics = () => {
           <Download className="h-4 w-4" /> Download CSV
         </button>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Model Usage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {usageRows.length === 0 ? (
+            <p className="text-sm text-slate-500">No model requests recorded in this server session yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-left text-slate-500">
+                  <tr><th className="pb-3">Model</th><th className="pb-3">Requests</th><th className="pb-3">Errors</th><th className="pb-3">Avg. latency</th></tr>
+                </thead>
+                <tbody>
+                  {usageRows.map(row => (
+                    <tr key={`${row.provider}:${row.model}`} className="border-t border-slate-100 dark:border-slate-800">
+                      <td className="py-3 font-medium">{row.provider} · {row.model}</td>
+                      <td className="py-3">{row.requests}</td>
+                      <td className="py-3">{row.errors}</td>
+                      <td className="py-3">{row.averageLatencyMs} ms</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <Card>
